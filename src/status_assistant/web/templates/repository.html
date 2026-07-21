@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}{{ owner }}/{{ name }} — Status{% endblock %}
+
+{% block content %}
+{% if view is none %}
+  <section class="empty">
+    <h1>{{ owner }}/{{ name }}</h1>
+    <p>This repository hasn't been synced yet.</p>
+    <p class="hint">
+      Trigger a sync:
+      <code>curl -X POST localhost:8000/api/repositories/{{ owner }}/{{ name }}/sync</code>
+    </p>
+  </section>
+{% else %}
+  <section class="repo-header">
+    <h1><a href="{{ view.repository.html_url }}">{{ view.repository.full_name }}</a></h1>
+    <p class="synced">
+      {% if view.repository.last_synced_at %}
+        Last synced {{ view.repository.last_synced_at | datetime }}
+      {% else %}
+        Not yet synced
+      {% endif %}
+    </p>
+  </section>
+
+  <section class="panel">
+    <h2>Active pull requests <span class="count">{{ view.active_pull_requests | length }}</span></h2>
+    {% if view.active_pull_requests %}
+      <table>
+        <thead>
+          <tr><th>#</th><th>Title</th><th>Author</th><th>Updated</th></tr>
+        </thead>
+        <tbody>
+          {% for pr in view.active_pull_requests %}
+            <tr>
+              <td class="num">{{ pr.number }}</td>
+              <td>
+                <a href="{{ pr.html_url }}">{{ pr.title }}</a>
+                {% if pr.is_draft %}<span class="badge draft">draft</span>{% endif %}
+              </td>
+              <td>{{ pr.author_login or "—" }}</td>
+              <td class="when">{{ pr.updated_at | datetime }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="empty-list">No open pull requests.</p>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <h2>Active issues <span class="count">{{ view.active_issues | length }}</span></h2>
+    {% if view.active_issues %}
+      <table>
+        <thead>
+          <tr><th>#</th><th>Title</th><th>Author</th><th>Updated</th></tr>
+        </thead>
+        <tbody>
+          {% for issue in view.active_issues %}
+            <tr>
+              <td class="num">{{ issue.number }}</td>
+              <td><a href="{{ issue.html_url }}">{{ issue.title }}</a></td>
+              <td>{{ issue.author_login or "—" }}</td>
+              <td class="when">{{ issue.updated_at | datetime }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="empty-list">No open issues.</p>
+    {% endif %}
+  </section>
+{% endif %}
+{% endblock %}
