@@ -1,0 +1,104 @@
+:root {
+  --bg: #f6f8fa;
+  --panel: #ffffff;
+  --border: #d0d7de;
+  --text: #1f2328;
+  --muted: #656d76;
+  --link: #0969da;
+  --accent: #8250df;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+}
+
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.site-header {
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  padding: 0.75rem 1.5rem;
+}
+.site-title { font-weight: 600; color: var(--text); }
+
+.content {
+  max-width: 960px;
+  margin: 1.5rem auto;
+  padding: 0 1.5rem;
+}
+
+.repo-header h1 { margin: 0 0 0.25rem; font-size: 1.5rem; }
+.synced { color: var(--muted); margin: 0 0 1.5rem; font-size: 0.9rem; }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1.5rem;
+}
+.panel h2 {
+  font-size: 1.1rem;
+  margin: 0 0 0.75rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.count {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 2rem;
+  padding: 0 0.6rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+table { width: 100%; border-collapse: collapse; }
+th, td {
+  text-align: left;
+  padding: 0.5rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+th {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+}
+tbody tr:last-child td { border-bottom: none; }
+.num { color: var(--muted); width: 3rem; }
+.when { color: var(--muted); font-size: 0.85rem; white-space: nowrap; width: 10rem; }
+
+.badge {
+  display: inline-block;
+  font-size: 0.7rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 2rem;
+  margin-left: 0.4rem;
+  vertical-align: middle;
+}
+.badge.draft {
+  background: #eef1f4;
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+
+.empty-list { color: var(--muted); margin: 0; font-size: 0.9rem; }
+
+.empty h1 { margin-bottom: 0.5rem; }
+.hint { color: var(--muted); font-size: 0.9rem; }
+code {
+  background: #eef1f4;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  font-size: 0.85em;
+}

@@ -1,0 +1,60 @@
+[project]
+name = "status-assistant"
+version = "0.1.0"
+description = "AI-powered engineering status assistant that aggregates GitHub activity across repositories."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.139",
+    "uvicorn[standard]>=0.34",
+    "sqlmodel>=0.0.39",
+    "githubkit>=0.16",
+    "pydantic-settings>=2.7",
+    "jinja2>=3.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "respx>=0.22",
+    "httpx>=0.28",
+    "ruff>=0.9",
+    "mypy>=1.14",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/status_assistant"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# pycodestyle, pyflakes, isort, pep8-naming, pyupgrade, bugbear
+select = ["E", "F", "I", "N", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test doubles deliberately mirror githubkit's lowercase attribute namespaces
+# (client.rest.pulls, .issues, .repos), so the CapWords class-name rule doesn't apply.
+"tests/*" = ["N801"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+strict = true
+mypy_path = "src"
+# SQLModel/SQLAlchemy dynamic attributes trip strict mode; keep type checking
+# strict for our own code but don't fail on the ORM's untyped internals.
+[[tool.mypy.overrides]]
+module = ["githubkit.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+# "." puts the repo root on sys.path so `tests` is importable as a package
+# (test modules share helpers via `from tests.conftest import ...`).
+pythonpath = ["src", "."]
+testpaths = ["tests"]
