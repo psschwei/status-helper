@@ -21,6 +21,7 @@ from tests.conftest import (
     make_link,
     make_pull_request,
     make_repository,
+    make_review_request,
 )
 
 
@@ -272,3 +273,93 @@ def test_get_engineer_view_unknown_login_is_none(session: Session) -> None:
     session.commit()
 
     assert get_engineer_view(session, "nobody") is None
+
+
+# --- Reviews ---------------------------------------------------------------------
+
+
+def test_get_engineer_view_lists_reviews_owed(session: Session) -> None:
+    """A PR where the engineer is a requested reviewer shows under reviews_owed."""
+    session.add(make_repository(id=1, owner="a", name="one", full_name="a/one"))
+    # bob authored a PR and requested alice to review it.
+    session.add(make_pull_request(101, 1, "Bob's PR", repository_id=1, author_login="bob"))
+    session.add(make_review_request(101, "alice"))
+    # alice also has her own PR (not a review she owes).
+    session.add(make_pull_request(102, 2, "Alice's PR", repository_id=1, author_login="alice"))
+    session.commit()
+
+    view = get_engineer_view(session, "alice")
+
+    assert view is not None
+    assert [r.pull_request.number for r in view.reviews_owed] == [1]
+    owed = view.reviews_owed[0]
+    assert owed.repository.full_name == "a/one"
+    assert owed.requested_reviewers == ["alice"]
+
+
+def test_get_engineer_view_reviews_owed_excludes_own_pr(session: Session) -> None:
+    """You don't owe a review on your own PR, even if somehow listed as a reviewer."""
+    session.add(make_repository(id=1, full_name="a/one"))
+    session.add(make_pull_request(101, 1, "Alice's PR", repository_id=1, author_login="alice"))
+    session.add(make_review_request(101, "alice"))
+    session.commit()
+
+    view = get_engineer_view(session, "alice")
+
+    assert view is not None
+    assert view.reviews_owed == []
+
+
+def test_get_engineer_view_lists_prs_awaiting_review(session: Session) -> None:
+    """The engineer's own PR with a pending reviewer shows under prs_awaiting_review."""
+    session.add(make_repository(id=1, full_name="a/one"))
+    # alice's PR awaits bob and carol; her other PR has no reviewer requested.
+    session.add(make_pull_request(101, 1, "Needs review", repository_id=1, author_login="alice"))
+    session.add(make_review_request(101, "bob"))
+    session.add(make_review_request(101, "carol"))
+    session.add(make_pull_request(102, 2, "No reviewer", repository_id=1, author_login="alice"))
+    session.commit()
+
+    view = get_engineer_view(session, "alice")
+
+    assert view is not None
+    assert [r.pull_request.number for r in view.prs_awaiting_review] == [1]
+    # The full outstanding-reviewer set is attached, sorted.
+    assert view.prs_awaiting_review[0].requested_reviewers == ["bob", "carol"]
+
+
+def test_get_engineer_view_only_reviews_owed_still_returns_view(session: Session) -> None:
+    """An engineer with no PRs/issues of their own, but a review to do, still gets a page."""
+    session.add(make_repository(id=1, full_name="a/one"))
+    session.add(make_pull_request(101, 1, "Bob's PR", repository_id=1, author_login="bob"))
+    session.add(make_review_request(101, "alice"))
+    session.commit()
+
+    view = get_engineer_view(session, "alice")
+
+    assert view is not None
+    assert view.login == "alice"
+    assert (view.pull_request_count, view.issue_count) == (0, 0)
+    assert [r.pull_request.number for r in view.reviews_owed] == [1]
+    # The reviewed PR is bob's, so it isn't in alice's own per-repo work.
+    assert view.repos == []
+
+
+def test_get_engineer_view_orders_reviews_owed_by_updated_desc(session: Session) -> None:
+    session.add(make_repository(id=1, full_name="a/one"))
+    older = FIXED_TIME
+    newer = FIXED_TIME + timedelta(days=1)
+    session.add(
+        make_pull_request(101, 1, "old", repository_id=1, author_login="bob", updated_at=older)
+    )
+    session.add(
+        make_pull_request(102, 2, "new", repository_id=1, author_login="bob", updated_at=newer)
+    )
+    session.add(make_review_request(101, "alice"))
+    session.add(make_review_request(102, "alice"))
+    session.commit()
+
+    view = get_engineer_view(session, "alice")
+
+    assert view is not None
+    assert [r.pull_request.number for r in view.reviews_owed] == [2, 1]

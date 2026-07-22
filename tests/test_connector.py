@@ -85,10 +85,13 @@ class _FakeGitHub:
             return [
                 ns(id=101, number=1, title="Add feature X", state="open", draft=False,
                    user=ns(login="alice"), html_url="https://x/pull/1",
-                   created_at=NOW, updated_at=NOW),
+                   created_at=NOW, updated_at=NOW,
+                   # Two requested reviewers plus a ghost/null one that must be dropped.
+                   requested_reviewers=[ns(login="frank"), None, ns(login="grace")]),
                 ns(id=102, number=2, title="WIP refactor", state="open", draft=True,
                    user=None,  # ghost / deleted author
-                   html_url="https://x/pull/2", created_at=NOW, updated_at=NOW),
+                   html_url="https://x/pull/2", created_at=NOW, updated_at=NOW,
+                   requested_reviewers=[]),
             ]
         if request is self.rest.issues.list_for_repo:
             return [
@@ -123,7 +126,7 @@ def test_get_repository_maps_fields(connector: GitHubKitConnector) -> None:
 
 
 def test_list_pull_requests_maps_fields_and_draft(connector: GitHubKitConnector) -> None:
-    prs = connector.list_pull_requests("octocat", "hello-world")
+    prs = [item.pull_request for item in connector.list_pull_requests("octocat", "hello-world")]
     assert [pr.id for pr in prs] == [101, 102]
     assert prs[0].title == "Add feature X"
     assert prs[0].is_draft is False
@@ -131,9 +134,19 @@ def test_list_pull_requests_maps_fields_and_draft(connector: GitHubKitConnector)
 
 
 def test_ghost_author_maps_to_none(connector: GitHubKitConnector) -> None:
-    prs = connector.list_pull_requests("octocat", "hello-world")
+    prs = [item.pull_request for item in connector.list_pull_requests("octocat", "hello-world")]
     assert prs[0].author_login == "alice"
     assert prs[1].author_login is None  # user was None
+
+
+def test_list_pull_requests_maps_requested_reviewers_and_drops_ghosts(
+    connector: GitHubKitConnector,
+) -> None:
+    """Requested reviewers come from ``requested_reviewers``; null/ghost entries are dropped."""
+    items = connector.list_pull_requests("octocat", "hello-world")
+    assert items[0].requested_reviewer_logins == ["frank", "grace"]
+    # A PR with no requested reviewers yields an empty list, not an error.
+    assert items[1].requested_reviewer_logins == []
 
 
 def test_list_issues_excludes_pull_requests(connector: GitHubKitConnector) -> None:

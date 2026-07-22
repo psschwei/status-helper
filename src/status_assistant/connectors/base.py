@@ -30,6 +30,20 @@ class IssueWithAssignees:
     assignee_logins: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class PullRequestWithReviewers:
+    """A pull request paired with the logins requested to review it (zero, one, or many).
+
+    Exactly the assignee story, one relationship over: a PR can have many requested reviewers,
+    so they can't be a column on ``PullRequest`` and ride *alongside* it here instead. The REST
+    ``pulls.list`` payload already carries ``requested_reviewers``, so this needs no extra API
+    call — the connector maps it in the same pass it maps the PR.
+    """
+
+    pull_request: PullRequest
+    requested_reviewer_logins: list[str] = field(default_factory=list)
+
+
 class GitHubConnector(Protocol):
     """Read-only access to a single GitHub instance."""
 
@@ -39,8 +53,10 @@ class GitHubConnector(Protocol):
 
     def list_pull_requests(
         self, owner: str, name: str, *, state: str = "open"
-    ) -> list[PullRequest]:
-        """List pull requests for a repository (open by default)."""
+    ) -> list[PullRequestWithReviewers]:
+        """List pull requests for a repository (open by default), each with its requested
+        reviewer logins.
+        """
         ...
 
     def list_issues(

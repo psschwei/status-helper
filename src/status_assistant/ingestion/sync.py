@@ -19,7 +19,13 @@ from datetime import UTC, datetime
 from sqlmodel import Session, col, delete, select
 
 from status_assistant.connectors.base import GitHubConnector
-from status_assistant.models import Issue, IssueAssignee, PullRequest, PullRequestIssueLink
+from status_assistant.models import (
+    Issue,
+    IssueAssignee,
+    PRReviewRequest,
+    PullRequest,
+    PullRequestIssueLink,
+)
 from status_assistant.repos_config import RepoRef
 
 
@@ -58,13 +64,22 @@ def sync_repository(
     # ``col()`` yields a typed column expression so the comparison is a SQL predicate,
     # not a Python bool.
     #
-    # Assignee and PR→issue-link rows carry no ``repository_id``, so scope their deletes to
-    # this repo via a subquery on its issue / PR ids — and run them *before* the issues and
-    # PRs are deleted, while those ids still resolve.
+    # Assignee, review-request, and PR→issue-link rows carry no ``repository_id``, so scope
+    # their deletes to this repo via a subquery on its issue / PR ids — and run them *before*
+    # the issues and PRs are deleted, while those ids still resolve.
     session.exec(
         delete(IssueAssignee).where(
             col(IssueAssignee.issue_id).in_(
                 select(col(Issue.id)).where(col(Issue.repository_id) == repository.id)
+            )
+        )
+    )
+    session.exec(
+        delete(PRReviewRequest).where(
+            col(PRReviewRequest.pull_request_id).in_(
+                select(col(PullRequest.id)).where(
+                    col(PullRequest.repository_id) == repository.id
+                )
             )
         )
     )
@@ -80,9 +95,14 @@ def sync_repository(
     session.exec(delete(PullRequest).where(col(PullRequest.repository_id) == repository.id))
     session.exec(delete(Issue).where(col(Issue.repository_id) == repository.id))
 
-    for pr in pull_requests:
+    for pr_item in pull_requests:
+        # ``pr_item.pull_request.id`` is GitHub's own id (set by the connector), so it's known
+        # here — review-request rows can be built in the same pass, no flush needed.
+        pr = pr_item.pull_request
         pr.repository_id = repository.id
         session.add(pr)
+        for login in pr_item.requested_reviewer_logins:
+            session.add(PRReviewRequest(pull_request_id=pr.id, login=login))
     for item in issues:
         # ``item.issue.id`` is GitHub's own id (set by the connector, not autoincremented),
         # so it's known here — assignee rows can be built in the same pass, no flush needed.
@@ -95,7 +115,7 @@ def sync_repository(
     # fetched for this repo. That enforces the "cached open issues only" scope (a link to a
     # closed or cross-repo issue is dropped) and, since both ids then reference rows added
     # above, keeps the foreign keys satisfiable. Dedupe so a repeated pair inserts once.
-    pr_ids = {pr.id for pr in pull_requests}
+    pr_ids = {item.pull_request.id for item in pull_requests}
     issue_ids = {item.issue.id for item in issues}
     for pr_id, issue_id in {
         (pr_id, issue_id)

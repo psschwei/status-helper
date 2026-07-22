@@ -33,6 +33,9 @@ def _view() -> EngineerView:
                 prs_without_issue=[draft_pr],
             )
         ],
+        # The prompt builder doesn't consume reviews yet; empty is a faithful default.
+        reviews_owed=[],
+        prs_awaiting_review=[],
     )
 
 

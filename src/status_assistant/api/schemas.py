@@ -14,6 +14,7 @@ from status_assistant.queries import (
     EngineerView,
     RepositoryListItem,
     RepositoryView,
+    ReviewItem,
 )
 
 
@@ -118,13 +119,31 @@ class EngineerRepoWorkOut(BaseModel):
     prs_without_issue: list[PullRequestOut]
 
 
+class ReviewItemOut(BaseModel):
+    """A PR in a review relationship: the PR, its repository, and its requested reviewers."""
+
+    pull_request: PullRequestOut
+    repository: RepositoryOut
+    requested_reviewers: list[str]
+
+    @classmethod
+    def from_item(cls, item: ReviewItem) -> "ReviewItemOut":
+        return cls(
+            pull_request=PullRequestOut.model_validate(item.pull_request),
+            repository=RepositoryOut.model_validate(item.repository),
+            requested_reviewers=item.requested_reviewers,
+        )
+
+
 class EngineerViewOut(BaseModel):
-    """The Engineer view payload: open work grouped per repository, plus totals."""
+    """The Engineer view payload: open work grouped per repository, totals, and reviews."""
 
     login: str
     pull_request_count: int
     issue_count: int
     repos: list[EngineerRepoWorkOut]
+    reviews_owed: list[ReviewItemOut]
+    prs_awaiting_review: list[ReviewItemOut]
 
     @classmethod
     def from_view(cls, view: EngineerView) -> "EngineerViewOut":
@@ -132,6 +151,10 @@ class EngineerViewOut(BaseModel):
             login=view.login,
             pull_request_count=view.pull_request_count,
             issue_count=view.issue_count,
+            reviews_owed=[ReviewItemOut.from_item(r) for r in view.reviews_owed],
+            prs_awaiting_review=[
+                ReviewItemOut.from_item(r) for r in view.prs_awaiting_review
+            ],
             repos=[
                 EngineerRepoWorkOut(
                     repository=RepositoryOut.model_validate(work.repository),

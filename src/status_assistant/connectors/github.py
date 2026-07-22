@@ -12,7 +12,7 @@ from typing import Any
 
 from githubkit import GitHub
 
-from status_assistant.connectors.base import IssueWithAssignees
+from status_assistant.connectors.base import IssueWithAssignees, PullRequestWithReviewers
 from status_assistant.models import Issue, PullRequest, Repository
 
 
@@ -36,6 +36,18 @@ def _assignee_logins(item: Any) -> list[str]:
     """
     assignees = getattr(item, "assignees", None) or []
     return [login for user in assignees if (login := _author_login(user))]
+
+
+def _requested_reviewer_logins(pr: Any) -> list[str]:
+    """Extract the logins of everyone requested to review a pull request.
+
+    ``requested_reviewers`` is the list of *user* reviewers still owing a review (GitHub drops
+    a reviewer once they submit). Team review requests live under a separate
+    ``requested_teams`` field and are intentionally ignored — we track people, not teams. Null
+    / ghost entries are dropped the same defensive way as :func:`_author_login`.
+    """
+    reviewers = getattr(pr, "requested_reviewers", None) or []
+    return [login for user in reviewers if (login := _author_login(user))]
 
 
 def _to_datetime(value: Any) -> datetime:
@@ -83,24 +95,27 @@ class GitHubKitConnector:
 
     def list_pull_requests(
         self, owner: str, name: str, *, state: str = "open"
-    ) -> list[PullRequest]:
+    ) -> list[PullRequestWithReviewers]:
         # We don't yet know the repository's numeric id here, so leave repository_id to the
         # ingestion layer, which owns the Repository row. Store 0 as a placeholder.
         prs = self._paginate(
             self._github.rest.pulls.list, owner=owner, repo=name, state=state
         )
         return [
-            PullRequest(
-                id=pr.id,
-                number=pr.number,
-                repository_id=0,  # filled in by ingestion
-                title=pr.title,
-                state=pr.state,
-                is_draft=bool(getattr(pr, "draft", False)),
-                author_login=_author_login(pr.user),
-                html_url=pr.html_url,
-                created_at=_to_datetime(pr.created_at),
-                updated_at=_to_datetime(pr.updated_at),
+            PullRequestWithReviewers(
+                pull_request=PullRequest(
+                    id=pr.id,
+                    number=pr.number,
+                    repository_id=0,  # filled in by ingestion
+                    title=pr.title,
+                    state=pr.state,
+                    is_draft=bool(getattr(pr, "draft", False)),
+                    author_login=_author_login(pr.user),
+                    html_url=pr.html_url,
+                    created_at=_to_datetime(pr.created_at),
+                    updated_at=_to_datetime(pr.updated_at),
+                ),
+                requested_reviewer_logins=_requested_reviewer_logins(pr),
             )
             for pr in prs
         ]

@@ -11,38 +11,55 @@ blocked, and where to focus — without manually gathering status.
 This is built incrementally in vertical slices. See `AI_Engineering_Status_Assistant_Prompt.md`
 for the full product vision.
 
-## Current slice: AI Status Summary (first LLM slice)
+## Current slice: Reviews on the Engineer page
 
-Slices 1–3 are deterministic. This slice adds the **first LLM integration**: an on-demand,
-persisted AI status summary on the Engineer page. The path, end to end:
+This slice ingests each open PR's **currently-requested reviewers** and surfaces two
+review-related bullets from the Engineer View spec — deterministically, no LLM. On an
+engineer's page, a **Reviews** panel now shows:
+
+- **Reviews you owe** — open PRs where the engineer is still a requested reviewer.
+- **Your PRs awaiting review** — the engineer's own open PRs that still have requested
+  reviewers (i.e. waiting on someone else).
+
+GitHub removes a reviewer from a PR's requested list the moment they submit a review, so
+"still requested" is a naturally-accurate proxy for "review outstanding" — which is why this
+slice can ship *requested reviewers only*, without ingesting submitted-review verdicts. Only
+*user* reviewers are stored; team/org review requests are out of scope. Requested reviewers
+come free in the REST `pulls.list` payload, so no extra API call is needed.
+
+The full path, end to end:
 
 1. Configure **N** repositories in `repos.toml`.
-2. Sync each repository's **open pull requests** and **open issues** from the GitHub REST
-   API (per-repo, or all at once).
+2. Sync each repository's **open pull requests** (with their requested reviewers) and **open
+   issues** from the GitHub REST API (per-repo, or all at once).
 3. Persist them to SQLite (an idempotent cache of GitHub state).
 4. Serve them via a JSON API.
 5. Render a **home dashboard** (every watched repository with its open-PR/issue counts), a
    per-repository **Repository page**, an **Engineers directory**, and a per-engineer
-   **Engineer page** showing their open work grouped by repository.
+   **Engineer page** showing their open work grouped by repository, plus the **Reviews** panel.
 6. On the Engineer page, a **Generate summary** button asks an LLM to summarize that
    engineer's open work into a short status update, stored and shown on reload (with a
    **Regenerate** button).
 
-Slice 1 delivered the single-repository Repository View; slice 2 made repositories
-first-class and added the dashboard; slice 3 added the Engineer View. Engineers are a
-*derived* axis, computed from what's already cached: a PR belongs to whoever **opened** it
-(`author_login`), while an issue belongs to whoever it is **assigned** to (the
-`IssueAssignee` table — an issue can have several assignees, so it counts for each).
+Earlier slices: slice 1 delivered the single-repository Repository View; slice 2 made
+repositories first-class and added the dashboard; slice 3 added the Engineer View; slice 4
+added the first LLM integration (the AI status summary). Engineers are a *derived* axis,
+computed from what's already cached: a PR belongs to whoever **opened** it (`author_login`), an
+issue belongs to whoever it is **assigned** to (the `IssueAssignee` table), and a review is
+owed by whoever is **requested** on a PR (the `PRReviewRequest` table — a PR can request
+several reviewers, so it counts for each).
 
-**Division of labor for the AI slice:** deterministic code gathers and shapes the facts (the
+**Division of labor for the AI summary:** deterministic code gathers and shapes the facts (the
 engineer's PRs/issues, counts, draft flags, dates); the LLM only *summarizes* them into prose —
 it never fetches or computes. The client is accessed through an OpenAI-compatible endpoint (a
 LiteLLM proxy, or a provider API), behind an `AISummarizer` protocol that mirrors the
 `GitHubConnector` seam. Summaries are **derived output**, not cached GitHub state, so a
 repository re-sync does not clear them (a `generated_at` timestamp makes staleness visible).
+(The summary prompt does not yet include review load — a natural next increment now that the
+data exists.)
 
-Reviews, "reviews owed", blockers, and completed work depend on data not yet ingested, and
-Repository/Team summaries arrive in later slices.
+Blockers, completed work, and Repository/Team summaries depend on data not yet ingested and
+arrive in later slices.
 
 ## Requirements
 
@@ -158,7 +175,7 @@ src/status_assistant/
   repos_config.py   # RepoRef + load_repos(): parse/validate repos.toml (stdlib tomllib)
   engineers_config.py # EngineerRef + load_engineers()/allowed_logins(): optional roster filter
   db.py             # SQLite engine + session
-  models.py         # SQLModel tables: Repository, PullRequest, Issue, IssueAssignee, EngineerSummary
+  models.py         # SQLModel tables: Repository, PullRequest, Issue, IssueAssignee, PRReviewRequest, PullRequestIssueLink, EngineerSummary
   dependencies.py   # get_connector_for(base_url) + get_summarizer/get_optional_summarizer (the seams)
   connectors/
     base.py         # GitHubConnector Protocol (the data-source seam)
@@ -184,11 +201,14 @@ instance is used today; the `Repository.github_base_url` column and the connecto
 leave multi-instance support as an additive change.
 
 **Engineers** are a *derived* axis, not a stored entity: they're computed from what's already
-cached — PRs by their `author_login`, issues by their assignees (`IssueAssignee`) — so the
-Engineer View is mostly read-side (a query, a router, and pages). The one stored addition is
-the assignee join table, because an issue's assignees are many-valued and can't live on the
-issue row. A GitHub login is treated as the identity; a first-class identity model is only
-warranted once identities are correlated across sources (Slack/Jira), so it's deferred.
+cached — PRs by their `author_login`, issues by their assignees (`IssueAssignee`), and reviews
+owed by their requested-reviewer rows (`PRReviewRequest`) — so the Engineer View is mostly
+read-side (a query, a router, and pages). The stored additions are the join tables
+(`IssueAssignee`, `PRReviewRequest`), because assignees and requested reviewers are both
+many-valued and can't live on the issue/PR row. `PRReviewRequest` mirrors `IssueAssignee` end
+to end: its own table, replaced wholesale on each sync, keyed off ids known at ingest time. A
+GitHub login is treated as the identity; a first-class identity model is only warranted once
+identities are correlated across sources (Slack/Jira), so it's deferred.
 
 The **AI summarizer** follows the same seam pattern as the connector: `AISummarizer` is a
 narrow `Protocol` (prose-in via `SummaryPrompt`, prose-out), and `OpenAISummarizer` is the

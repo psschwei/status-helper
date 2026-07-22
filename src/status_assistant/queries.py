@@ -5,6 +5,7 @@ render from the *same* query, never from one calling the other over HTTP. As mor
 arrive, this is where their queries live.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from sqlmodel import Session, col, func, select
@@ -13,6 +14,7 @@ from status_assistant.models import (
     EngineerSummary,
     Issue,
     IssueAssignee,
+    PRReviewRequest,
     PullRequest,
     PullRequestIssueLink,
     Repository,
@@ -194,11 +196,31 @@ class EngineerRepoWork:
 
 
 @dataclass(frozen=True)
+class ReviewItem:
+    """A pull request in a review relationship, with the repo it lives in and its reviewers.
+
+    Used for both "reviews you owe" (a PR where the engineer is a requested reviewer) and "your
+    PRs awaiting review" (the engineer's own PR that still has requested reviewers). The
+    ``repository`` rides along so the template can link and label without a second lookup;
+    ``requested_reviewers`` is that PR's full outstanding-reviewer set (useful on the
+    awaiting-review side to show who's holding it up).
+    """
+
+    pull_request: PullRequest
+    repository: Repository
+    requested_reviewers: list[str]
+
+
+@dataclass(frozen=True)
 class EngineerView:
-    """Everything the Engineer page needs: their open work grouped per repository."""
+    """Everything the Engineer page needs: their open work grouped per repository, plus the
+    two review lists (reviews they owe, and their own PRs still awaiting review).
+    """
 
     login: str
     repos: list[EngineerRepoWork]
+    reviews_owed: list[ReviewItem]
+    prs_awaiting_review: list[ReviewItem]
 
     @property
     def pull_request_count(self) -> int:
@@ -215,6 +237,56 @@ class EngineerView:
             len({p.issue.id for p in r.paired} | {i.id for i in r.issues_without_pr})
             for r in self.repos
         )
+
+
+def _review_items(
+    session: Session,
+    pull_requests: Sequence[PullRequest],
+    *,
+    only_with_reviewers: bool = False,
+) -> list[ReviewItem]:
+    """Wrap ``pull_requests`` as :class:`ReviewItem`s, attaching each PR's repository and its
+    full requested-reviewer set.
+
+    Reviewers and repositories are fetched in one grouped query each (regardless of how many
+    PRs), then joined in Python — the same fixed-query-count style as the count helpers above.
+    With ``only_with_reviewers`` the result is limited to PRs that still have at least one
+    requested reviewer (used for "your PRs awaiting review"); otherwise every PR is returned.
+    Ordered most-recently-updated first.
+    """
+    if not pull_requests:
+        return []
+
+    pr_ids = {pr.id for pr in pull_requests}
+
+    reviewers_by_pr: dict[int, list[str]] = {}
+    for pr_id, reviewer in session.exec(
+        select(PRReviewRequest.pull_request_id, PRReviewRequest.login).where(
+            col(PRReviewRequest.pull_request_id).in_(pr_ids)
+        )
+    ).all():
+        reviewers_by_pr.setdefault(pr_id, []).append(reviewer)
+
+    repo_ids = {pr.repository_id for pr in pull_requests}
+    repositories = {
+        repo.id: repo
+        for repo in session.exec(
+            select(Repository).where(col(Repository.id).in_(repo_ids))
+        ).all()
+    }
+
+    items = [
+        ReviewItem(
+            pull_request=pr,
+            repository=repositories[pr.repository_id],
+            requested_reviewers=sorted(reviewers_by_pr.get(pr.id, [])),
+        )
+        for pr in pull_requests
+        if pr.repository_id in repositories
+        and (not only_with_reviewers or reviewers_by_pr.get(pr.id))
+    ]
+    items.sort(key=lambda item: item.pull_request.updated_at, reverse=True)
+    return items
 
 
 def get_engineer_view(
@@ -256,8 +328,39 @@ def get_engineer_view(
         ).all()
     )
 
-    if not own_pull_requests and not own_issues:
+    # Reviews the engineer *owes*: open PRs where they are a requested reviewer. GitHub drops a
+    # reviewer from the request list once they submit, so a row's presence means "still owed."
+    # A PR authored by the engineer is excluded — you don't owe a review on your own PR (GitHub
+    # won't request it, but guard regardless).
+    reviews_owed = _review_items(
+        session,
+        list(
+            session.exec(
+                select(PullRequest)
+                .join(
+                    PRReviewRequest,
+                    col(PRReviewRequest.pull_request_id) == col(PullRequest.id),
+                )
+                .where(
+                    col(PRReviewRequest.login) == login,
+                    col(PullRequest.author_login) != login,
+                )
+            ).all()
+        ),
+    )
+
+    # An engineer with *only* reviews owed (no PRs of their own, no assigned issues) still gets
+    # a page — the review work is theirs to do even if they've opened nothing.
+    if not own_pull_requests and not own_issues and not reviews_owed:
         return None
+
+    # The engineer's own open PRs that still have any requested reviewer — i.e. blocked waiting
+    # on someone else's review. Built from ``own_pull_requests`` we already hold.
+    awaiting = _review_items(
+        session,
+        own_pull_requests,
+        only_with_reviewers=True,
+    )
 
     # Load every link that touches one of the engineer's PRs or issues. Union attribution:
     # a link where the engineer owns *either* side brings in the counterpart, even if the
@@ -343,7 +446,12 @@ def get_engineer_view(
         )
     repos.sort(key=lambda r: r.repository.full_name)
 
-    return EngineerView(login=login, repos=repos)
+    return EngineerView(
+        login=login,
+        repos=repos,
+        reviews_owed=reviews_owed,
+        prs_awaiting_review=awaiting,
+    )
 
 
 def get_engineer_summary(session: Session, login: str) -> EngineerSummary | None:

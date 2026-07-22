@@ -115,3 +115,21 @@ class IssueAssignee(SQLModel, table=True):
 
     issue_id: int = Field(foreign_key="issue.id", primary_key=True, index=True)
     login: str = Field(primary_key=True)
+
+
+class PRReviewRequest(SQLModel, table=True):
+    """A GitHub login requested to review a pull request — the request, not the person.
+
+    A PR can have zero, one, or many requested reviewers, which a single column on
+    ``PullRequest`` can't represent, so requests live here as their own rows — the same
+    reasoning as ``IssueAssignee``. The composite primary key ``(pull_request_id, login)``
+    makes a given request unique and idempotent to re-insert.
+
+    GitHub removes a reviewer from a PR's ``requested_reviewers`` list once they *submit* a
+    review, so a row's mere presence means "still owes a review." That makes "still requested"
+    a naturally-accurate proxy for "review outstanding" without our having to ingest submitted
+    reviews. Only *user* reviewers are stored; team/org review requests are out of scope.
+    """
+
+    pull_request_id: int = Field(foreign_key="pullrequest.id", primary_key=True, index=True)
+    login: str = Field(primary_key=True)

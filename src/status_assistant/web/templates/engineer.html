@@ -40,6 +40,58 @@
     {% endif %}
   </section>
 
+  {% if view.reviews_owed or view.prs_awaiting_review %}
+    <section class="panel">
+      <h2>Reviews</h2>
+
+      {% if view.reviews_owed %}
+        <h3>Reviews you owe <span class="count">{{ view.reviews_owed | length }}</span></h3>
+        <table>
+          <thead>
+            <tr><th>Pull request</th><th>Author</th><th>Updated</th></tr>
+          </thead>
+          <tbody>
+            {% for item in view.reviews_owed %}
+              <tr>
+                <td>
+                  <a href="/repositories/{{ item.repository.owner }}/{{ item.repository.name }}">{{ item.repository.full_name }}</a>
+                  <span class="num">#{{ item.pull_request.number }}</span>
+                  <a href="{{ item.pull_request.html_url }}">{{ item.pull_request.title }}</a>
+                  {% if item.pull_request.is_draft %}<span class="badge draft">draft</span>{% endif %}
+                </td>
+                <td>{{ item.pull_request.author_login or "—" }}</td>
+                <td class="when">{{ item.pull_request.updated_at | datetime }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+
+      {% if view.prs_awaiting_review %}
+        <h3>Your PRs awaiting review <span class="count">{{ view.prs_awaiting_review | length }}</span></h3>
+        <table>
+          <thead>
+            <tr><th>Pull request</th><th>Requested reviewers</th><th>Updated</th></tr>
+          </thead>
+          <tbody>
+            {% for item in view.prs_awaiting_review %}
+              <tr>
+                <td>
+                  <a href="/repositories/{{ item.repository.owner }}/{{ item.repository.name }}">{{ item.repository.full_name }}</a>
+                  <span class="num">#{{ item.pull_request.number }}</span>
+                  <a href="{{ item.pull_request.html_url }}">{{ item.pull_request.title }}</a>
+                  {% if item.pull_request.is_draft %}<span class="badge draft">draft</span>{% endif %}
+                </td>
+                <td>{{ item.requested_reviewers | join(", ") }}</td>
+                <td class="when">{{ item.pull_request.updated_at | datetime }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+    </section>
+  {% endif %}
+
   {% for work in view.repos %}
     <section class="panel">
       <h2>

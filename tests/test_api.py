@@ -300,6 +300,34 @@ def test_engineer_view_endpoint_pairs_linked_issue_and_pr(
     assert work["prs_without_issue"] == []
 
 
+def test_engineer_view_endpoint_includes_reviews(
+    client: TestClient, use_connector: InstallConnector, use_repos: InstallRepos
+) -> None:
+    """End-to-end: reviews owed and PRs awaiting review surface in the engineer JSON."""
+    use_connector(
+        FakeGitHubConnector(
+            repository=make_repository(id=1, owner="octocat", name="hello-world",
+                                       full_name="octocat/hello-world"),
+            pull_requests=[
+                # bob's PR requests alice — a review alice owes.
+                make_pull_request(101, 1, "Bob's PR", author_login="bob"),
+                # alice's own PR requests carol — one of alice's PRs awaiting review.
+                make_pull_request(102, 2, "Alice's PR", author_login="alice"),
+            ],
+            reviewers={101: ["alice"], 102: ["carol"]},
+        )
+    )
+    use_repos([("octocat", "hello-world")])
+    client.post("/api/repositories/sync")
+
+    body = client.get("/api/engineers/alice").json()
+
+    assert [r["pull_request"]["number"] for r in body["reviews_owed"]] == [1]
+    assert body["reviews_owed"][0]["repository"]["full_name"] == "octocat/hello-world"
+    assert [r["pull_request"]["number"] for r in body["prs_awaiting_review"]] == [2]
+    assert body["prs_awaiting_review"][0]["requested_reviewers"] == ["carol"]
+
+
 def test_engineer_view_404_for_unknown_login(
     client: TestClient, use_connector: InstallConnector, use_repos: InstallRepos
 ) -> None:
@@ -478,9 +506,12 @@ def test_generate_summary_404_for_unknown_login(
 
 
 def test_generate_summary_503_when_llm_not_configured(
-    client: TestClient, use_connector: InstallConnector, use_repos: InstallRepos
+    client: TestClient,
+    use_connector: InstallConnector,
+    use_repos: InstallRepos,
+    no_summarizer: None,
 ) -> None:
-    """With no summarizer override installed and no LLM_API_KEY, generation is unavailable."""
+    """With the summarizer pinned unavailable (no LLM), generation returns 503."""
     use_connector(_multi_connector())
     use_repos([("octocat", "hello-world")])
     client.post("/api/repositories/sync")

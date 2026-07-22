@@ -24,7 +24,10 @@ from sqlmodel.pool import StaticPool  # noqa: E402
 
 from status_assistant.ai.base import SummaryPrompt  # noqa: E402
 from status_assistant.config import get_settings  # noqa: E402
-from status_assistant.connectors.base import IssueWithAssignees  # noqa: E402
+from status_assistant.connectors.base import (  # noqa: E402
+    IssueWithAssignees,
+    PullRequestWithReviewers,
+)
 from status_assistant.db import get_session  # noqa: E402
 from status_assistant.dependencies import get_connector, get_optional_summarizer  # noqa: E402
 from status_assistant.engineers_config import EngineerRef  # noqa: E402
@@ -32,6 +35,7 @@ from status_assistant.main import app  # noqa: E402
 from status_assistant.models import (  # noqa: E402
     Issue,
     IssueAssignee,
+    PRReviewRequest,
     PullRequest,
     PullRequestIssueLink,
     Repository,
@@ -78,6 +82,7 @@ class FakeGitHubConnector:
         pull_requests: list[PullRequest] | None = None,
         issues: list[Issue] | None = None,
         assignees: dict[int, list[str]] | None = None,
+        reviewers: dict[int, list[str]] | None = None,
         links: list[tuple[int, int]] | None = None,
     ) -> None:
         self._repository = repository
@@ -87,6 +92,9 @@ class FakeGitHubConnector:
         # on the Issue objects) because assignees ride *alongside* the issue in the real
         # connector too — and a private attr on Issue wouldn't survive model_dump() below.
         self._assignees = assignees or {}
+        # Canned requested-reviewer logins keyed by PR id — parallel to ``pull_requests``, for
+        # the same reason assignees are kept off the model.
+        self._reviewers = reviewers or {}
         # Canned (pull_request_id, issue_id) closing links, mirroring the real connector's
         # ``list_closing_issue_links``. Unfiltered — ingestion drops links to un-cached issues.
         self._links = links or []
@@ -100,8 +108,14 @@ class FakeGitHubConnector:
 
     def list_pull_requests(
         self, owner: str, name: str, *, state: str = "open"
-    ) -> list[PullRequest]:
-        return [PullRequest(**pr.model_dump()) for pr in self._pull_requests]
+    ) -> list[PullRequestWithReviewers]:
+        return [
+            PullRequestWithReviewers(
+                pull_request=PullRequest(**pr.model_dump()),
+                requested_reviewer_logins=list(self._reviewers.get(pr.id, [])),
+            )
+            for pr in self._pull_requests
+        ]
 
     def list_issues(
         self, owner: str, name: str, *, state: str = "open"
@@ -137,7 +151,7 @@ class FakeMultiRepoConnector:
 
     def list_pull_requests(
         self, owner: str, name: str, *, state: str = "open"
-    ) -> list[PullRequest]:
+    ) -> list[PullRequestWithReviewers]:
         return self._for(owner, name).list_pull_requests(owner, name, state=state)
 
     def list_issues(
@@ -221,6 +235,10 @@ def make_link(pull_request_id: int, issue_id: int) -> PullRequestIssueLink:
     return PullRequestIssueLink(pull_request_id=pull_request_id, issue_id=issue_id)
 
 
+def make_review_request(pull_request_id: int, login: str) -> PRReviewRequest:
+    return PRReviewRequest(pull_request_id=pull_request_id, login=login)
+
+
 @pytest.fixture
 def client(engine: Engine) -> Iterator[TestClient]:
     """A ``TestClient`` whose DB session is bound to the in-memory ``engine``.
@@ -249,6 +267,18 @@ def use_connector(
         app.dependency_overrides[get_connector] = lambda: connector
 
     return _install
+
+
+@pytest.fixture
+def no_summarizer(client: TestClient) -> None:
+    """Force the "LLM not configured" path regardless of the machine's ``.env``.
+
+    ``get_optional_summarizer`` takes ``settings`` as a plain default arg (not a ``Depends``),
+    so FastAPI resolves it with ``settings=None`` and it falls back to the *real* ``Settings``
+    — the ``get_settings`` stub doesn't reach it. On a dev machine with a real ``LLM_API_KEY``
+    that yields a live summarizer, so a test asserting the 503/not-configured path must pin the
+    dependency to ``None`` explicitly (mirroring how ``use_summarizer`` pins it to a fake)."""
+    app.dependency_overrides[get_optional_summarizer] = lambda: None
 
 
 @pytest.fixture

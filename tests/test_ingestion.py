@@ -11,6 +11,7 @@ from status_assistant.ingestion.sync import sync_all, sync_repository
 from status_assistant.models import (
     Issue,
     IssueAssignee,
+    PRReviewRequest,
     PullRequest,
     PullRequestIssueLink,
     Repository,
@@ -130,6 +131,51 @@ def test_resync_replaces_issue_assignees(session: Session) -> None:
 
     rows = session.exec(select(IssueAssignee)).all()
     assert {(r.issue_id, r.login) for r in rows} == {(201, "frank")}
+
+
+def test_sync_persists_pr_review_requests(session: Session) -> None:
+    connector = FakeGitHubConnector(
+        repository=make_repository(),
+        pull_requests=[make_pull_request(101, 1, "Add X"), make_pull_request(102, 2, "Add Y")],
+        # PR 101 has two requested reviewers; PR 102 has none.
+        reviewers={101: ["dave", "erin"]},
+    )
+
+    sync_repository(session, connector, "octocat", "hello-world")
+
+    rows = session.exec(select(PRReviewRequest)).all()
+    assert {(r.pull_request_id, r.login) for r in rows} == {(101, "dave"), (101, "erin")}
+    # The PR with no requested reviewers produces no review-request rows.
+    assert all(r.pull_request_id != 102 for r in rows)
+
+
+def test_resync_replaces_pr_review_requests(session: Session) -> None:
+    repo = make_repository()
+
+    sync_repository(
+        session,
+        FakeGitHubConnector(
+            repository=repo,
+            pull_requests=[make_pull_request(101, 1, "Add X")],
+            reviewers={101: ["dave", "erin"]},
+        ),
+        "octocat",
+        "hello-world",
+    )
+    # Second sync: the review request changed to just frank; dave/erin must not linger.
+    sync_repository(
+        session,
+        FakeGitHubConnector(
+            repository=repo,
+            pull_requests=[make_pull_request(101, 1, "Add X")],
+            reviewers={101: ["frank"]},
+        ),
+        "octocat",
+        "hello-world",
+    )
+
+    rows = session.exec(select(PRReviewRequest)).all()
+    assert {(r.pull_request_id, r.login) for r in rows} == {(101, "frank")}
 
 
 def test_sync_persists_pr_issue_links_only_for_cached_issues(session: Session) -> None:
