@@ -18,6 +18,7 @@ from status_assistant.api.schemas import (
     EngineerViewOut,
     RepositoryListItemOut,
     RepositoryViewOut,
+    ReviewerListItemOut,
     SyncResultOut,
 )
 from status_assistant.config import Settings, get_settings
@@ -32,6 +33,7 @@ from status_assistant.queries import (
     get_repository_view,
     list_engineers,
     list_repositories,
+    list_reviewers,
 )
 
 router = APIRouter(prefix="/api/repositories", tags=["repositories"])
@@ -109,6 +111,22 @@ def engineer_view(login: str, session: SessionDep, settings: SettingsDep) -> Eng
             detail=f"No open work found for engineer '{login}'.",
         )
     return EngineerViewOut.from_view(view)
+
+
+# Reviews are another *derived* axis over the cached PRs and review requests (keyed by reviewer
+# login), so like engineers they need no ingestion of their own — a separate router again.
+reviews_router = APIRouter(prefix="/api/reviews", tags=["reviews"])
+
+
+@reviews_router.get("", response_model=list[ReviewerListItemOut])
+def list_reviewers_view(session: SessionDep, settings: SettingsDep) -> list[ReviewerListItemOut]:
+    """Return every engineer with review activity, with their two review counts.
+
+    Limited to the configured engineer roster (``engineers.toml``) when one exists, the same
+    filter the engineer directory uses.
+    """
+    allowed = allowed_logins(settings.load_engineers())
+    return [ReviewerListItemOut.from_item(item) for item in list_reviewers(session, allowed)]
 
 
 SummarizerDep = Annotated[AISummarizer | None, Depends(get_optional_summarizer)]

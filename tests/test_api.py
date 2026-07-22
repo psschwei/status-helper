@@ -429,6 +429,83 @@ def test_engineers_page_filtered_by_roster(
     assert "No open work found" in page.text
 
 
+# --- Reviews -----------------------------------------------------------------------
+
+
+def _reviews_connector() -> FakeGitHubConnector:
+    """A repo where alice owes a review (on bob's PR) and has her own PR awaiting carol."""
+    return FakeGitHubConnector(
+        repository=make_repository(id=1, owner="octocat", name="hello-world",
+                                   full_name="octocat/hello-world"),
+        pull_requests=[
+            make_pull_request(101, 1, "Bob's PR", author_login="bob"),
+            make_pull_request(102, 2, "Alice's PR", author_login="alice"),
+        ],
+        reviewers={101: ["alice"], 102: ["carol"]},
+    )
+
+
+def test_list_reviewers_endpoint(
+    client: TestClient, use_connector: InstallConnector, use_repos: InstallRepos
+) -> None:
+    """The reviews directory reports each engineer's reviews-owed and awaiting-review counts."""
+    use_connector(_reviews_connector())
+    use_repos([("octocat", "hello-world")])
+    client.post("/api/repositories/sync")
+
+    by_login = {r["login"]: r for r in client.get("/api/reviews").json()}
+
+    # alice owes one review (bob's PR) and has one of her own awaiting review (carol).
+    assert by_login["alice"] == {"login": "alice", "reviews_owed": 1, "awaiting_review": 1}
+    # bob's PR requests alice, so bob's own PR is awaiting review; bob owes nothing.
+    assert by_login["bob"] == {"login": "bob", "reviews_owed": 0, "awaiting_review": 1}
+    # carol is only a requested reviewer (owes one); she has authored nothing.
+    assert by_login["carol"] == {"login": "carol", "reviews_owed": 1, "awaiting_review": 0}
+
+
+def test_reviews_html_page_renders(
+    client: TestClient, use_connector: InstallConnector, use_repos: InstallRepos
+) -> None:
+    use_connector(_reviews_connector())
+    use_repos([("octocat", "hello-world")])
+    client.post("/api/repositories/sync")
+
+    page = client.get("/reviews")
+
+    assert page.status_code == 200
+    assert "Reviews" in page.text
+    assert "alice" in page.text
+    # Each reviewer links into their engineer page's reviews section.
+    assert "/engineers/alice#reviews" in page.text
+
+
+def test_reviews_page_empty_state(client: TestClient) -> None:
+    """With nothing synced, the reviews page is a friendly 200 with no reviewers."""
+    resp = client.get("/reviews")
+    assert resp.status_code == 200
+    assert "No outstanding reviews" in resp.text
+
+
+def test_reviews_filtered_by_roster(
+    client: TestClient,
+    use_connector: InstallConnector,
+    use_repos: InstallRepos,
+    use_engineers: InstallEngineers,
+) -> None:
+    """The reviews directory honors the engineer roster, like the engineer directory."""
+    use_connector(_reviews_connector())
+    use_repos([("octocat", "hello-world")])
+    use_engineers([EngineerRef(name="Alice", handles=["alice"])])
+    client.post("/api/repositories/sync")
+
+    listed = [r["login"] for r in client.get("/api/reviews").json()]
+    assert listed == ["alice"]
+
+    page = client.get("/reviews")
+    assert "alice" in page.text
+    assert "carol" not in page.text
+
+
 # --- AI summaries ----------------------------------------------------------------
 
 

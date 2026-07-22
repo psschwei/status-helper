@@ -11,11 +11,13 @@ blocked, and where to focus — without manually gathering status.
 This is built incrementally in vertical slices. See `AI_Engineering_Status_Assistant_Prompt.md`
 for the full product vision.
 
-## Current slice: Reviews on the Engineer page
+## Current slice: Reviews as a top-level page
 
 This slice ingests each open PR's **currently-requested reviewers** and surfaces two
-review-related bullets from the Engineer View spec — deterministically, no LLM. On an
-engineer's page, a **Reviews** panel now shows:
+review-related bullets from the Engineer View spec — deterministically, no LLM. **Reviews**
+is now its own top-level page (alongside Repositories and Engineers): a directory of everyone
+with outstanding review activity and their two counts, each linking into that engineer's
+Reviews section. On an engineer's page, the **Reviews** panel shows:
 
 - **Reviews you owe** — open PRs where the engineer is still a requested reviewer.
 - **Your PRs awaiting review** — the engineer's own open PRs that still have requested
@@ -35,8 +37,9 @@ The full path, end to end:
 3. Persist them to SQLite (an idempotent cache of GitHub state).
 4. Serve them via a JSON API.
 5. Render a **home dashboard** (every watched repository with its open-PR/issue counts), a
-   per-repository **Repository page**, an **Engineers directory**, and a per-engineer
-   **Engineer page** showing their open work grouped by repository, plus the **Reviews** panel.
+   per-repository **Repository page**, an **Engineers directory**, a per-engineer
+   **Engineer page** showing their open work grouped by repository (with a **Reviews** panel),
+   and a top-level **Reviews directory** of everyone with outstanding review activity.
 6. On the Engineer page, a **Generate summary** button asks an LLM to summarize that
    engineer's open work into a short status update, stored and shown on reload (with a
    **Regenerate** button).
@@ -145,6 +148,9 @@ curl localhost:8000/api/engineers
 # Fetch one engineer's open work (grouped by repository) as JSON
 curl localhost:8000/api/engineers/<login>
 
+# List everyone with outstanding review activity and their reviews-owed/awaiting counts
+curl localhost:8000/api/reviews
+
 # Generate (or regenerate) an engineer's AI status summary (needs LLM_API_KEY; 503 if not)
 curl -X POST localhost:8000/api/engineers/<login>/summary
 
@@ -154,8 +160,9 @@ curl localhost:8000/api/engineers/<login>/summary
 
 Open <http://localhost:8000/> for the home dashboard,
 <http://localhost:8000/repositories/<owner>/<name>> for a repository's page,
-<http://localhost:8000/engineers> for the engineer directory, and
-<http://localhost:8000/engineers/<login>> for an engineer's page.
+<http://localhost:8000/engineers> for the engineer directory,
+<http://localhost:8000/engineers/<login>> for an engineer's page, and
+<http://localhost:8000/reviews> for the reviews directory.
 
 ## Develop
 
@@ -188,7 +195,7 @@ src/status_assistant/
     sync.py         # sync_repository() and sync_all(): fetch -> map -> upsert
   queries.py        # repository + engineer read queries (incl. get_engineer_summary) — shared by API and web
   api/              # JSON endpoints + response DTOs (repository + engineer routers, incl. summary)
-  web/              # Jinja2 dashboard, Repository page, Engineer directory + page (with AI summary panel)
+  web/              # Jinja2 dashboard, Repository page, Engineer directory + page (with AI summary panel), Reviews directory
   main.py           # FastAPI app factory
 ```
 

@@ -29,6 +29,7 @@ from status_assistant.queries import (
     get_repository_view,
     list_engineers,
     list_repositories,
+    list_reviewers,
 )
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -158,6 +159,22 @@ def engineers_page(request: Request, session: SessionDep, settings: SettingsDep)
         request,
         "engineers.html",
         {"engineers": list_engineers(session, allowed)},
+    )
+
+
+@router.get("/reviews", response_class=HTMLResponse)
+def reviews_page(request: Request, session: SessionDep, settings: SettingsDep) -> HTMLResponse:
+    """Reviews directory: everyone with review activity, and their two review counts.
+
+    A landing list over the same per-engineer reviews shown on each engineer's page — each row
+    links into that engineer's Reviews section. Limited to the configured engineer roster when
+    one exists (``engineers.toml``), the same filter the engineer directory uses.
+    """
+    allowed = allowed_logins(settings.load_engineers())
+    return templates.TemplateResponse(
+        request,
+        "reviews.html",
+        {"reviewers": list_reviewers(session, allowed)},
     )
 
 

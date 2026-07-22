@@ -170,6 +170,85 @@ def list_engineers(
 
 
 @dataclass(frozen=True)
+class ReviewerListItem:
+    """An engineer with review activity, plus their two review counts, for the reviews list.
+
+    ``reviews_owed`` is how many open PRs (opened by someone else) list them as a still-requested
+    reviewer; ``awaiting_review`` is how many of their own open PRs still have any requested
+    reviewer. An engineer appears if either count is non-zero.
+    """
+
+    login: str
+    reviews_owed: int
+    awaiting_review: int
+
+
+def list_reviewers(
+    session: Session, allowed_logins: set[str] | None = None
+) -> list[ReviewerListItem]:
+    """Return every engineer with review activity, with their two review counts.
+
+    Like :func:`list_engineers`, a "reviewer" isn't a stored entity — it's derived from the open
+    PRs and review requests we already cache. Two notions, mirroring the per-engineer reviews
+    section (see :func:`get_engineer_view`):
+
+    * **reviews owed** — the engineer is a requested reviewer on an open PR they did *not*
+      author (GitHub drops a reviewer from the request list once they submit, so a live request
+      means the review is still owed). Keyed by ``PRReviewRequest.login``.
+    * **awaiting review** — one of the engineer's *own* open PRs still has at least one requested
+      reviewer, i.e. it's blocked on someone else. Keyed by ``PullRequest.author_login``.
+
+    Counts come from two grouped aggregates merged in Python — a fixed number of queries
+    regardless of reviewer count. Logins are the union across the two; blank logins are skipped.
+    Ordered by login for a stable list.
+
+    When ``allowed_logins`` is given, only those logins are returned (the engineer roster filter,
+    see :func:`list_engineers`); ``None`` (the default) means no filter.
+    """
+
+    def _reviews_owed_by_login() -> dict[str, int]:
+        rows = session.exec(
+            select(PRReviewRequest.login, func.count())
+            .join(
+                PullRequest,
+                col(PullRequest.id) == col(PRReviewRequest.pull_request_id),
+            )
+            .where(col(PullRequest.author_login) != PRReviewRequest.login)
+            .group_by(col(PRReviewRequest.login))
+        ).all()
+        return {login: count for login, count in rows if login}
+
+    def _awaiting_review_by_author() -> dict[str, int]:
+        # Distinct PRs (a PR with two requested reviewers must not count twice for its author).
+        rows = session.exec(
+            select(PullRequest.author_login, func.count(func.distinct(col(PullRequest.id))))
+            .join(
+                PRReviewRequest,
+                col(PRReviewRequest.pull_request_id) == col(PullRequest.id),
+            )
+            .where(col(PullRequest.author_login).is_not(None))
+            .group_by(col(PullRequest.author_login))
+        ).all()
+        return {login: count for login, count in rows if login}
+
+    owed_counts = _reviews_owed_by_login()
+    awaiting_counts = _awaiting_review_by_author()
+
+    logins = owed_counts.keys() | awaiting_counts.keys()
+    if allowed_logins is not None:
+        logins &= allowed_logins
+
+    return [
+        ReviewerListItem(
+            login=login,
+            reviews_owed=owed_counts.get(login, 0),
+            awaiting_review=awaiting_counts.get(login, 0),
+        )
+        for login in sorted(logins)
+    ]
+
+
+@dataclass(frozen=True)
 class IssuePRPair:
     """A linked issue paired with a pull request that closes it."""
 

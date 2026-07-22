@@ -41,7 +41,7 @@
   </section>
 
   {% if view.reviews_owed or view.prs_awaiting_review %}
-    <section class="panel">
+    <section class="panel" id="reviews">
       <h2>Reviews</h2>
 
       {% if view.reviews_owed %}

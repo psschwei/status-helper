@@ -14,6 +14,7 @@ from status_assistant.queries import (
     EngineerView,
     RepositoryListItem,
     RepositoryView,
+    ReviewerListItem,
     ReviewItem,
 )
 
@@ -100,6 +101,22 @@ class EngineerListItemOut(BaseModel):
             login=item.login,
             pull_request_count=item.pull_request_count,
             issue_count=item.issue_count,
+        )
+
+
+class ReviewerListItemOut(BaseModel):
+    """A reviews-directory row: an engineer plus their reviews-owed and awaiting-review counts."""
+
+    login: str
+    reviews_owed: int
+    awaiting_review: int
+
+    @classmethod
+    def from_item(cls, item: ReviewerListItem) -> "ReviewerListItemOut":
+        return cls(
+            login=item.login,
+            reviews_owed=item.reviews_owed,
+            awaiting_review=item.awaiting_review,
         )
 
 

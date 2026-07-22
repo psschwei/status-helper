@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Reviews — Engineering Status Assistant{% endblock %}
+
+{% block content %}
+<section class="repo-header">
+  <h1>Reviews</h1>
+  <p class="synced">Everyone with outstanding review activity across watched repositories.</p>
+</section>
+
+<section class="panel">
+  <h2>Reviewers <span class="count">{{ reviewers | length }}</span></h2>
+  {% if reviewers %}
+    <table>
+      <thead>
+        <tr><th>Engineer</th><th>Reviews owed</th><th>Awaiting review</th></tr>
+      </thead>
+      <tbody>
+        {% for rev in reviewers %}
+          <tr>
+            <td><a href="/engineers/{{ rev.login }}#reviews">{{ rev.login }}</a></td>
+            <td class="num">{{ rev.reviews_owed }}</td>
+            <td class="num">{{ rev.awaiting_review }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="empty-list">
+      No outstanding reviews. Sync a repository first:
+      <code>curl -X POST localhost:8000/api/repositories/sync</code>
+    </p>
+  {% endif %}
+</section>
+{% endblock %}
