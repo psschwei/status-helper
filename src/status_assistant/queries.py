@@ -9,7 +9,13 @@ from dataclasses import dataclass
 
 from sqlmodel import Session, col, func, select
 
-from status_assistant.models import Issue, IssueAssignee, PullRequest, Repository
+from status_assistant.models import (
+    Issue,
+    IssueAssignee,
+    PullRequest,
+    PullRequestIssueLink,
+    Repository,
+)
 
 
 @dataclass(frozen=True)
@@ -161,12 +167,29 @@ def list_engineers(
 
 
 @dataclass(frozen=True)
+class IssuePRPair:
+    """A linked issue paired with a pull request that closes it."""
+
+    issue: Issue
+    pull_request: PullRequest
+
+
+@dataclass(frozen=True)
 class EngineerRepoWork:
-    """One engineer's open work within a single repository."""
+    """One engineer's open work within a single repository, split into three sections.
+
+    The sections are ordered to tell the story of the work: an issue and the PR closing it
+    first, then issues still needing a PR, then PRs not tied to any tracked issue.
+
+    A single issue closed by two PRs (or one PR closing two issues) appears as multiple pair
+    rows — the simplest faithful rendering of a many-to-many link. An issue or PR that shows
+    up in ``paired`` is *not* repeated in the unpaired lists.
+    """
 
     repository: Repository
-    pull_requests: list[PullRequest]
-    issues: list[Issue]
+    paired: list[IssuePRPair]
+    issues_without_pr: list[Issue]
+    prs_without_issue: list[PullRequest]
 
 
 @dataclass(frozen=True)
@@ -178,11 +201,19 @@ class EngineerView:
 
     @property
     def pull_request_count(self) -> int:
-        return sum(len(r.pull_requests) for r in self.repos)
+        """Distinct PRs across all sections (a PR in a pair isn't double-counted)."""
+        return sum(
+            len({p.pull_request.id for p in r.paired} | {pr.id for pr in r.prs_without_issue})
+            for r in self.repos
+        )
 
     @property
     def issue_count(self) -> int:
-        return sum(len(r.issues) for r in self.repos)
+        """Distinct issues across all sections (an issue in a pair isn't double-counted)."""
+        return sum(
+            len({p.issue.id for p in r.paired} | {i.id for i in r.issues_without_pr})
+            for r in self.repos
+        )
 
 
 def get_engineer_view(
@@ -194,8 +225,15 @@ def get_engineer_view(
     *assigned* to them (joined through ``IssueAssignee``), consistent with the counts in
     :func:`list_engineers`. Returns ``None`` when the login has neither (the API turns that
     into a 404; the web page shows a friendly empty state) — the same convention as
-    :func:`get_repository_view`. Repositories are ordered by ``full_name``; within a repo,
-    items are ordered most-recently-updated first, matching the Repository view.
+    :func:`get_repository_view`.
+
+    Work is then linked and split into three per-repository sections (see
+    :class:`EngineerRepoWork`): an issue paired with the PR closing it, issues with no PR, and
+    PRs with no issue. Pairing uses **union attribution** — an issue+PR pair surfaces if the
+    engineer authored the PR *or* is assigned the issue, so "my PR closes someone's issue" and
+    "someone's PR closes my issue" both appear. The linked counterpart is pulled in even when
+    only one side is directly the engineer's. Repositories are ordered by ``full_name``;
+    within each section, items are ordered most-recently-updated first.
 
     When ``allowed_logins`` is given and ``login`` is not in it, returns ``None`` — so an
     engineer excluded by the roster is unreachable by URL too, keeping the per-engineer page
@@ -204,27 +242,70 @@ def get_engineer_view(
     if allowed_logins is not None and login not in allowed_logins:
         return None
 
-    pull_requests = list(
+    own_pull_requests = list(
         session.exec(
-            select(PullRequest)
-            .where(col(PullRequest.author_login) == login)
-            .order_by(col(PullRequest.updated_at).desc())
+            select(PullRequest).where(col(PullRequest.author_login) == login)
         ).all()
     )
-    issues = list(
+    own_issues = list(
         session.exec(
             select(Issue)
             .join(IssueAssignee, col(IssueAssignee.issue_id) == col(Issue.id))
             .where(col(IssueAssignee.login) == login)
-            .order_by(col(Issue.updated_at).desc())
         ).all()
     )
 
-    if not pull_requests and not issues:
+    if not own_pull_requests and not own_issues:
         return None
 
+    # Load every link that touches one of the engineer's PRs or issues. Union attribution:
+    # a link where the engineer owns *either* side brings in the counterpart, even if the
+    # counterpart isn't otherwise theirs.
+    own_pr_ids = {pr.id for pr in own_pull_requests}
+    own_issue_ids = {i.id for i in own_issues}
+    links = list(
+        session.exec(
+            select(PullRequestIssueLink).where(
+                col(PullRequestIssueLink.pull_request_id).in_(own_pr_ids)
+                | col(PullRequestIssueLink.issue_id).in_(own_issue_ids)
+            )
+        ).all()
+    )
+
+    # Resolve the linked counterparts we don't already hold, then index everything by id.
+    linked_pr_ids = {link.pull_request_id for link in links}
+    linked_issue_ids = {link.issue_id for link in links}
+    prs_by_id = {pr.id: pr for pr in own_pull_requests}
+    issues_by_id = {i.id: i for i in own_issues}
+    missing_pr_ids = linked_pr_ids - prs_by_id.keys()
+    missing_issue_ids = linked_issue_ids - issues_by_id.keys()
+    if missing_pr_ids:
+        for pr in session.exec(
+            select(PullRequest).where(col(PullRequest.id).in_(missing_pr_ids))
+        ).all():
+            prs_by_id[pr.id] = pr
+    if missing_issue_ids:
+        for issue in session.exec(
+            select(Issue).where(col(Issue.id).in_(missing_issue_ids))
+        ).all():
+            issues_by_id[issue.id] = issue
+
+    # Build the pairs. Both endpoints of a stored link are always cached (ingestion enforces
+    # that), but guard defensively in case one was concurrently removed.
+    pairs = [
+        IssuePRPair(issue=issues_by_id[link.issue_id], pull_request=prs_by_id[link.pull_request_id])
+        for link in links
+        if link.issue_id in issues_by_id and link.pull_request_id in prs_by_id
+    ]
+    paired_pr_ids = {pair.pull_request.id for pair in pairs}
+    paired_issue_ids = {pair.issue.id for pair in pairs}
+
+    # The full set of PRs/issues in view = the engineer's own plus any linked counterparts.
+    all_prs = list(prs_by_id.values())
+    all_issues = list(issues_by_id.values())
+
     # Fetch the referenced repositories in one query, then group the work in Python.
-    repo_ids = {pr.repository_id for pr in pull_requests} | {i.repository_id for i in issues}
+    repo_ids = {pr.repository_id for pr in all_prs} | {i.repository_id for i in all_issues}
     repositories = {
         repo.id: repo
         for repo in session.exec(
@@ -232,22 +313,33 @@ def get_engineer_view(
         ).all()
     }
 
-    prs_by_repo: dict[int, list[PullRequest]] = {}
-    for pr in pull_requests:
-        prs_by_repo.setdefault(pr.repository_id, []).append(pr)
-    issues_by_repo: dict[int, list[Issue]] = {}
-    for issue in issues:
-        issues_by_repo.setdefault(issue.repository_id, []).append(issue)
-
-    repos = [
-        EngineerRepoWork(
-            repository=repositories[repo_id],
-            pull_requests=prs_by_repo.get(repo_id, []),
-            issues=issues_by_repo.get(repo_id, []),
+    repos: list[EngineerRepoWork] = []
+    for repo_id in repo_ids:
+        if repo_id not in repositories:
+            continue
+        repo_pairs = sorted(
+            (p for p in pairs if p.issue.repository_id == repo_id),
+            key=lambda p: p.issue.updated_at,
+            reverse=True,
         )
-        for repo_id in repo_ids
-        if repo_id in repositories
-    ]
+        repo_issues_no_pr = sorted(
+            (i for i in all_issues if i.repository_id == repo_id and i.id not in paired_issue_ids),
+            key=lambda i: i.updated_at,
+            reverse=True,
+        )
+        repo_prs_no_issue = sorted(
+            (p for p in all_prs if p.repository_id == repo_id and p.id not in paired_pr_ids),
+            key=lambda p: p.updated_at,
+            reverse=True,
+        )
+        repos.append(
+            EngineerRepoWork(
+                repository=repositories[repo_id],
+                paired=repo_pairs,
+                issues_without_pr=repo_issues_no_pr,
+                prs_without_issue=repo_prs_no_issue,
+            )
+        )
     repos.sort(key=lambda r: r.repository.full_name)
 
     return EngineerView(login=login, repos=repos)

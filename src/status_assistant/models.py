@@ -65,6 +65,24 @@ class Issue(SQLModel, table=True):
     updated_at: datetime
 
 
+class PullRequestIssueLink(SQLModel, table=True):
+    """A pull request's "closes/fixes" link to an issue.
+
+    Sourced from GitHub's ``closingIssuesReferences`` (GraphQL), which captures both closing
+    keywords in a PR body (``Fixes #123``) and manually-linked issues. A PR can close many
+    issues and an issue can be closed by many PRs, so the relationship lives in its own table
+    rather than as a column — the same reasoning as ``IssueAssignee``.
+
+    Only links whose issue is *also cached* (open, in a watched repo) are stored (see
+    ``ingestion/sync.py``), so both endpoints always resolve to a local row. The composite
+    primary key ``(pull_request_id, issue_id)`` makes a given link unique and idempotent to
+    re-insert.
+    """
+
+    pull_request_id: int = Field(foreign_key="pullrequest.id", primary_key=True, index=True)
+    issue_id: int = Field(foreign_key="issue.id", primary_key=True, index=True)
+
+
 class IssueAssignee(SQLModel, table=True):
     """A GitHub login assigned to an issue — the assignment, not the person.
 

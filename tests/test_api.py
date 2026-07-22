@@ -263,8 +263,39 @@ def test_engineer_view_endpoint_groups_per_repo(
     body = resp.json()
     assert body["login"] == "alice"
     assert body["pull_request_count"] == 3
-    per_repo = {r["repository"]["full_name"]: len(r["pull_requests"]) for r in body["repos"]}
+    # No links in this fixture, so every PR is in the "PRs without an issue" section.
+    per_repo = {
+        r["repository"]["full_name"]: len(r["prs_without_issue"]) for r in body["repos"]
+    }
     assert per_repo == {"octocat/hello-world": 1, "acme/api": 2}
+
+
+def test_engineer_view_endpoint_pairs_linked_issue_and_pr(
+    client: TestClient, use_connector: InstallConnector, use_repos: InstallRepos
+) -> None:
+    """End-to-end: a PR that closes an assigned issue surfaces as a pair in the JSON."""
+    use_connector(
+        FakeGitHubConnector(
+            repository=make_repository(id=1, owner="octocat", name="hello-world",
+                                       full_name="octocat/hello-world"),
+            pull_requests=[make_pull_request(101, 1, "Fix bug", author_login="alice")],
+            issues=[make_issue(201, 2, "The bug")],
+            assignees={201: ["alice"]},
+            links=[(101, 201)],
+        )
+    )
+    use_repos([("octocat", "hello-world")])
+    client.post("/api/repositories/sync")
+
+    resp = client.get("/api/engineers/alice")
+
+    assert resp.status_code == 200
+    work = resp.json()["repos"][0]
+    assert len(work["paired"]) == 1
+    assert work["paired"][0]["issue"]["number"] == 2
+    assert work["paired"][0]["pull_request"]["number"] == 1
+    assert work["issues_without_pr"] == []
+    assert work["prs_without_issue"] == []
 
 
 def test_engineer_view_404_for_unknown_login(

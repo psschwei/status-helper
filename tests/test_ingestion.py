@@ -8,7 +8,13 @@ GitHub: retitled items update in place, and items that have closed drop out.
 from sqlmodel import Session, select
 
 from status_assistant.ingestion.sync import sync_all, sync_repository
-from status_assistant.models import Issue, IssueAssignee, PullRequest, Repository
+from status_assistant.models import (
+    Issue,
+    IssueAssignee,
+    PullRequest,
+    PullRequestIssueLink,
+    Repository,
+)
 from status_assistant.repos_config import RepoRef
 from tests.conftest import (
     FakeGitHubConnector,
@@ -124,6 +130,53 @@ def test_resync_replaces_issue_assignees(session: Session) -> None:
 
     rows = session.exec(select(IssueAssignee)).all()
     assert {(r.issue_id, r.login) for r in rows} == {(201, "frank")}
+
+
+def test_sync_persists_pr_issue_links_only_for_cached_issues(session: Session) -> None:
+    """A closing link is stored only when *both* endpoints are in the fetched open set."""
+    connector = FakeGitHubConnector(
+        repository=make_repository(),
+        pull_requests=[make_pull_request(101, 1, "Fix"), make_pull_request(102, 2, "Other")],
+        issues=[make_issue(201, 3, "A bug")],
+        # 101→201 is fully cached; 102→999 references a closed/absent issue and must be dropped.
+        links=[(101, 201), (102, 999)],
+    )
+
+    sync_repository(session, connector, "octocat", "hello-world")
+
+    rows = session.exec(select(PullRequestIssueLink)).all()
+    assert {(r.pull_request_id, r.issue_id) for r in rows} == {(101, 201)}
+
+
+def test_resync_replaces_pr_issue_links(session: Session) -> None:
+    repo = make_repository()
+
+    sync_repository(
+        session,
+        FakeGitHubConnector(
+            repository=repo,
+            pull_requests=[make_pull_request(101, 1, "Fix")],
+            issues=[make_issue(201, 3, "A bug")],
+            links=[(101, 201)],
+        ),
+        "octocat",
+        "hello-world",
+    )
+    # Second sync: the PR now closes a different issue; the old link must not linger.
+    sync_repository(
+        session,
+        FakeGitHubConnector(
+            repository=repo,
+            pull_requests=[make_pull_request(101, 1, "Fix")],
+            issues=[make_issue(202, 4, "Another bug")],
+            links=[(101, 202)],
+        ),
+        "octocat",
+        "hello-world",
+    )
+
+    rows = session.exec(select(PullRequestIssueLink)).all()
+    assert {(r.pull_request_id, r.issue_id) for r in rows} == {(101, 202)}
 
 
 def test_resync_updates_last_synced_at(session: Session) -> None:

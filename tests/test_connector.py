@@ -53,6 +53,33 @@ class _FakeGitHub:
         _FakeGitHub.last_kwargs = {"args": args, "kwargs": kwargs}
         self.rest = _FakeRest()
 
+    def graphql(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
+        # One page of PRs: #101 closes issues 201 and 202; #102 closes nothing. A null
+        # databaseId (a reference to something outside our reach) must be skipped.
+        return {
+            "repository": {
+                "pullRequests": {
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "nodes": [
+                        {
+                            "databaseId": 101,
+                            "closingIssuesReferences": {
+                                "nodes": [
+                                    {"databaseId": 201},
+                                    {"databaseId": 202},
+                                    {"databaseId": None},
+                                ]
+                            },
+                        },
+                        {
+                            "databaseId": 102,
+                            "closingIssuesReferences": {"nodes": []},
+                        },
+                    ],
+                }
+            }
+        }
+
     def paginate(self, request: Any, **kwargs: Any) -> list[SimpleNamespace]:
         if request is self.rest.pulls.list:
             return [
@@ -123,6 +150,14 @@ def test_list_issues_maps_assignees_and_drops_ghosts(connector: GitHubKitConnect
     """Assignees come from the plural ``assignees`` array; null/ghost entries are dropped."""
     issues = connector.list_issues("octocat", "hello-world")
     assert issues[0].assignee_logins == ["dave", "erin"]
+
+
+def test_list_closing_issue_links_maps_pairs_and_drops_null(
+    connector: GitHubKitConnector,
+) -> None:
+    """closingIssuesReferences → (pr_id, issue_id) pairs, skipping null databaseIds."""
+    links = connector.list_closing_issue_links("octocat", "hello-world")
+    assert links == [(101, 201), (101, 202)]
 
 
 def test_enterprise_base_url_is_passed_to_client(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -52,3 +52,14 @@ class GitHubConnector(Protocol):
         otherwise returns alongside genuine issues.
         """
         ...
+
+    def list_closing_issue_links(self, owner: str, name: str) -> list[tuple[int, int]]:
+        """List a repository's open PR → issue "closes/fixes" links.
+
+        Each pair is ``(pull_request_id, issue_id)`` using GitHub's *numeric* ids — the same
+        id space as ``PullRequest.id`` and ``Issue.id`` — so the ingestion layer can match
+        them against the rows it just fetched without any extra lookup. Sourced from GitHub's
+        ``closingIssuesReferences`` (both closing keywords and manually-linked issues); the
+        set is unfiltered here, and ingestion drops links to issues it doesn't cache.
+        """
+        ...

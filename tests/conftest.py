@@ -32,6 +32,7 @@ from status_assistant.models import (  # noqa: E402
     Issue,
     IssueAssignee,
     PullRequest,
+    PullRequestIssueLink,
     Repository,
 )
 from status_assistant.repos_config import RepoRef  # noqa: E402
@@ -76,6 +77,7 @@ class FakeGitHubConnector:
         pull_requests: list[PullRequest] | None = None,
         issues: list[Issue] | None = None,
         assignees: dict[int, list[str]] | None = None,
+        links: list[tuple[int, int]] | None = None,
     ) -> None:
         self._repository = repository
         self._pull_requests = pull_requests or []
@@ -84,6 +86,9 @@ class FakeGitHubConnector:
         # on the Issue objects) because assignees ride *alongside* the issue in the real
         # connector too — and a private attr on Issue wouldn't survive model_dump() below.
         self._assignees = assignees or {}
+        # Canned (pull_request_id, issue_id) closing links, mirroring the real connector's
+        # ``list_closing_issue_links``. Unfiltered — ingestion drops links to un-cached issues.
+        self._links = links or []
 
     # Rebuild fresh instances from field values on every call. A real connector returns new
     # objects each time; more importantly, ``model_copy()`` on a SQLModel *table* instance
@@ -107,6 +112,9 @@ class FakeGitHubConnector:
             )
             for issue in self._issues
         ]
+
+    def list_closing_issue_links(self, owner: str, name: str) -> list[tuple[int, int]]:
+        return list(self._links)
 
 
 class FakeMultiRepoConnector:
@@ -135,6 +143,9 @@ class FakeMultiRepoConnector:
         self, owner: str, name: str, *, state: str = "open"
     ) -> list[IssueWithAssignees]:
         return self._for(owner, name).list_issues(owner, name, state=state)
+
+    def list_closing_issue_links(self, owner: str, name: str) -> list[tuple[int, int]]:
+        return self._for(owner, name).list_closing_issue_links(owner, name)
 
 
 def make_repository(**overrides: object) -> Repository:
@@ -185,6 +196,10 @@ def make_issue(issue_id: int, number: int, title: str, **overrides: object) -> I
 
 def make_issue_assignee(issue_id: int, login: str) -> IssueAssignee:
     return IssueAssignee(issue_id=issue_id, login=login)
+
+
+def make_link(pull_request_id: int, issue_id: int) -> PullRequestIssueLink:
+    return PullRequestIssueLink(pull_request_id=pull_request_id, issue_id=issue_id)
 
 
 @pytest.fixture

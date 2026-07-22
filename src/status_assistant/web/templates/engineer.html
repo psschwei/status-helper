@@ -26,14 +26,57 @@
         <a href="/repositories/{{ work.repository.owner }}/{{ work.repository.name }}">{{ work.repository.full_name }}</a>
       </h2>
 
-      {% if work.pull_requests %}
-        <h3>Pull requests <span class="count">{{ work.pull_requests | length }}</span></h3>
+      {% if work.paired %}
+        <h3>Issues &amp; their PRs <span class="count">{{ work.paired | length }}</span></h3>
+        <table>
+          <thead>
+            <tr><th>Issue</th><th>Pull request</th><th>Updated</th></tr>
+          </thead>
+          <tbody>
+            {% for pair in work.paired %}
+              <tr>
+                <td>
+                  <span class="num">#{{ pair.issue.number }}</span>
+                  <a href="{{ pair.issue.html_url }}">{{ pair.issue.title }}</a>
+                </td>
+                <td>
+                  <span class="num">#{{ pair.pull_request.number }}</span>
+                  <a href="{{ pair.pull_request.html_url }}">{{ pair.pull_request.title }}</a>
+                  {% if pair.pull_request.is_draft %}<span class="badge draft">draft</span>{% endif %}
+                </td>
+                <td class="when">{{ pair.issue.updated_at | datetime }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+
+      {% if work.issues_without_pr %}
+        <h3>Issues without a PR <span class="count">{{ work.issues_without_pr | length }}</span></h3>
         <table>
           <thead>
             <tr><th>#</th><th>Title</th><th>Updated</th></tr>
           </thead>
           <tbody>
-            {% for pr in work.pull_requests %}
+            {% for issue in work.issues_without_pr %}
+              <tr>
+                <td class="num">{{ issue.number }}</td>
+                <td><a href="{{ issue.html_url }}">{{ issue.title }}</a></td>
+                <td class="when">{{ issue.updated_at | datetime }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+
+      {% if work.prs_without_issue %}
+        <h3>PRs without an issue <span class="count">{{ work.prs_without_issue | length }}</span></h3>
+        <table>
+          <thead>
+            <tr><th>#</th><th>Title</th><th>Updated</th></tr>
+          </thead>
+          <tbody>
+            {% for pr in work.prs_without_issue %}
               <tr>
                 <td class="num">{{ pr.number }}</td>
                 <td>
@@ -41,24 +84,6 @@
                   {% if pr.is_draft %}<span class="badge draft">draft</span>{% endif %}
                 </td>
                 <td class="when">{{ pr.updated_at | datetime }}</td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      {% endif %}
-
-      {% if work.issues %}
-        <h3>Issues <span class="count">{{ work.issues | length }}</span></h3>
-        <table>
-          <thead>
-            <tr><th>#</th><th>Title</th><th>Updated</th></tr>
-          </thead>
-          <tbody>
-            {% for issue in work.issues %}
-              <tr>
-                <td class="num">{{ issue.number }}</td>
-                <td><a href="{{ issue.html_url }}">{{ issue.title }}</a></td>
-                <td class="when">{{ issue.updated_at | datetime }}</td>
               </tr>
             {% endfor %}
           </tbody>

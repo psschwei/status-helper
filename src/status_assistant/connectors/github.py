@@ -134,3 +134,50 @@ class GitHubKitConnector:
                 IssueWithAssignees(issue=issue, assignee_logins=_assignee_logins(item))
             )
         return issues
+
+    # --- PR → issue links ---------------------------------------------------------
+
+    # GitHub's "linked issues" relationship (closing keywords like ``Fixes #123`` plus
+    # manually-linked issues) isn't exposed by the REST pulls endpoint, so we read it via
+    # GraphQL's ``closingIssuesReferences``. ``databaseId`` is the numeric REST id, matching
+    # our models' primary keys. The PR list is cursor-paginated; each PR's closing references
+    # are capped at 50 and *not* paginated — a single PR closing >50 issues is a mistake worth
+    # noticing, not a case worth supporting.
+    _CLOSING_LINKS_QUERY = """
+    query($owner: String!, $name: String!, $prCursor: String) {
+      repository(owner: $owner, name: $name) {
+        pullRequests(states: OPEN, first: 50, after: $prCursor) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            databaseId
+            closingIssuesReferences(first: 50) {
+              nodes { databaseId }
+            }
+          }
+        }
+      }
+    }
+    """
+
+    def list_closing_issue_links(self, owner: str, name: str) -> list[tuple[int, int]]:
+        links: list[tuple[int, int]] = []
+        pr_cursor: str | None = None
+        while True:
+            data = self._github.graphql(
+                self._CLOSING_LINKS_QUERY,
+                {"owner": owner, "name": name, "prCursor": pr_cursor},
+            )
+            connection = data["repository"]["pullRequests"]
+            for pr in connection["nodes"]:
+                pr_id = pr.get("databaseId")
+                if pr_id is None:
+                    continue
+                for issue in pr["closingIssuesReferences"]["nodes"]:
+                    issue_id = issue.get("databaseId")
+                    if issue_id is not None:
+                        links.append((pr_id, issue_id))
+            page = connection["pageInfo"]
+            if not page["hasNextPage"]:
+                break
+            pr_cursor = page["endCursor"]
+        return links

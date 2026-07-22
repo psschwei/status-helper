@@ -18,6 +18,7 @@ from tests.conftest import (
     FIXED_TIME,
     make_issue,
     make_issue_assignee,
+    make_link,
     make_pull_request,
     make_repository,
 )
@@ -164,9 +165,11 @@ def test_get_engineer_view_groups_work_per_repo(session: Session) -> None:
     # Repos ordered by full_name: "a/apple" before "z/zebra".
     assert [r.repository.full_name for r in view.repos] == ["a/apple", "z/zebra"]
     apple, zebra = view.repos
-    assert [i.number for i in apple.issues] == [2]
-    assert apple.pull_requests == []
-    assert [pr.number for pr in zebra.pull_requests] == [1]
+    # No links, so everything lands in the unpaired sections.
+    assert [i.number for i in apple.issues_without_pr] == [2]
+    assert apple.prs_without_issue == []
+    assert [pr.number for pr in zebra.prs_without_issue] == [1]
+    assert zebra.issues_without_pr == []
 
 
 def test_get_engineer_view_lists_assigned_not_authored_issues(session: Session) -> None:
@@ -179,7 +182,7 @@ def test_get_engineer_view_lists_assigned_not_authored_issues(session: Session) 
     assert get_engineer_view(session, "alice") is None
     bob = get_engineer_view(session, "bob")
     assert bob is not None
-    assert [i.number for i in bob.repos[0].issues] == [1]
+    assert [i.number for i in bob.repos[0].issues_without_pr] == [1]
 
 
 def test_get_engineer_view_orders_items_by_updated_desc(session: Session) -> None:
@@ -197,7 +200,70 @@ def test_get_engineer_view_orders_items_by_updated_desc(session: Session) -> Non
     view = get_engineer_view(session, "alice")
 
     assert view is not None
-    assert [pr.number for pr in view.repos[0].pull_requests] == [2, 1]
+    assert [pr.number for pr in view.repos[0].prs_without_issue] == [2, 1]
+
+
+def test_get_engineer_view_pairs_linked_issue_and_pr(session: Session) -> None:
+    """A PR linked to an open, cached issue shows as a pair — not in the unpaired lists."""
+    session.add(make_repository(id=1, full_name="a/one"))
+    # alice's PR closes an issue assigned to her, plus a standalone PR and a standalone issue.
+    session.add(make_pull_request(101, 1, "Fix bug", repository_id=1, author_login="alice"))
+    session.add(make_issue(201, 2, "The bug", repository_id=1))
+    session.add(make_issue_assignee(201, "alice"))
+    session.add(make_link(101, 201))
+    session.add(make_pull_request(102, 3, "Lone PR", repository_id=1, author_login="alice"))
+    session.add(make_issue(202, 4, "Lone issue", repository_id=1))
+    session.add(make_issue_assignee(202, "alice"))
+    session.commit()
+
+    view = get_engineer_view(session, "alice")
+
+    assert view is not None
+    work = view.repos[0]
+    assert [(p.issue.number, p.pull_request.number) for p in work.paired] == [(2, 1)]
+    assert [i.number for i in work.issues_without_pr] == [4]
+    assert [pr.number for pr in work.prs_without_issue] == [3]
+    # Distinct counts: the paired issue/PR aren't double-counted.
+    assert (view.pull_request_count, view.issue_count) == (2, 2)
+
+
+def test_get_engineer_view_pairs_via_union_attribution(session: Session) -> None:
+    """A pair surfaces when the engineer owns *either* side — not only both."""
+    session.add(make_repository(id=1, full_name="a/one"))
+    # alice authored the PR; the linked issue is assigned to *carol*, not alice.
+    session.add(make_pull_request(101, 1, "Fix", repository_id=1, author_login="alice"))
+    session.add(make_issue(201, 2, "Bug", repository_id=1))
+    session.add(make_issue_assignee(201, "carol"))
+    session.add(make_link(101, 201))
+    session.commit()
+
+    view = get_engineer_view(session, "alice")
+
+    assert view is not None
+    work = view.repos[0]
+    # alice's PR pulls in carol's issue as the paired counterpart.
+    assert [(p.issue.number, p.pull_request.number) for p in work.paired] == [(2, 1)]
+    assert work.issues_without_pr == []
+    assert work.prs_without_issue == []
+
+
+def test_get_engineer_view_ignores_link_to_uncached_issue(session: Session) -> None:
+    """A link whose issue isn't in the view leaves the PR in the unpaired section.
+
+    Ingestion only stores links to cached issues, but a link can dangle if an issue was
+    concurrently removed; the query must not crash or fabricate a pair.
+    """
+    session.add(make_repository(id=1, full_name="a/one"))
+    session.add(make_pull_request(101, 1, "Fix", repository_id=1, author_login="alice"))
+    session.add(make_link(101, 999))  # issue 999 doesn't exist
+    session.commit()
+
+    view = get_engineer_view(session, "alice")
+
+    assert view is not None
+    work = view.repos[0]
+    assert work.paired == []
+    assert [pr.number for pr in work.prs_without_issue] == [1]
 
 
 def test_get_engineer_view_unknown_login_is_none(session: Session) -> None:

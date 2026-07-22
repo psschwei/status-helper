@@ -102,12 +102,20 @@ class EngineerListItemOut(BaseModel):
         )
 
 
+class IssuePRPairOut(BaseModel):
+    """A linked issue paired with the PR that closes it."""
+
+    issue: IssueOut
+    pull_request: PullRequestOut
+
+
 class EngineerRepoWorkOut(BaseModel):
-    """One engineer's open work within a single repository."""
+    """One engineer's open work within a single repository, split into three sections."""
 
     repository: RepositoryOut
-    pull_requests: list[PullRequestOut]
-    issues: list[IssueOut]
+    paired: list[IssuePRPairOut]
+    issues_without_pr: list[IssueOut]
+    prs_without_issue: list[PullRequestOut]
 
 
 class EngineerViewOut(BaseModel):
@@ -127,10 +135,19 @@ class EngineerViewOut(BaseModel):
             repos=[
                 EngineerRepoWorkOut(
                     repository=RepositoryOut.model_validate(work.repository),
-                    pull_requests=[
-                        PullRequestOut.model_validate(pr) for pr in work.pull_requests
+                    paired=[
+                        IssuePRPairOut(
+                            issue=IssueOut.model_validate(pair.issue),
+                            pull_request=PullRequestOut.model_validate(pair.pull_request),
+                        )
+                        for pair in work.paired
                     ],
-                    issues=[IssueOut.model_validate(i) for i in work.issues],
+                    issues_without_pr=[
+                        IssueOut.model_validate(i) for i in work.issues_without_pr
+                    ],
+                    prs_without_issue=[
+                        PullRequestOut.model_validate(pr) for pr in work.prs_without_issue
+                    ],
                 )
                 for work in view.repos
             ],
