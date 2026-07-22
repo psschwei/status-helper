@@ -1,14 +1,17 @@
 """Application configuration, loaded from environment variables / a `.env` file.
 
-Kept to exactly what slice 1 needs: how to reach one GitHub instance, which single
-repository to sync, and where to store the SQLite cache. LLM settings are intentionally
-absent — they arrive with the AI-summary slice.
+Split by nature: *secrets and instance connection details* live here (env / ``.env``),
+while the *set of repositories to watch* lives in a separate ``repos.toml`` (see
+``repos_config``) — structural config that is safe to commit. LLM settings are
+intentionally absent; they arrive with the AI-summary slice.
 """
 
 from functools import lru_cache
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from status_assistant.repos_config import RepoRef, load_repos
 
 
 class Settings(BaseSettings):
@@ -32,13 +35,18 @@ class Settings(BaseSettings):
     # Only disable for a GitHub Enterprise Server presenting a self-signed certificate.
     github_ssl_verify: bool = True
 
-    # --- The single repository to sync in this slice ---
-    repo_owner: str
-    repo_name: str
+    # --- The repositories to watch ---
+    # Path to the TOML file listing repositories (see repos_config / repos.toml). Kept out
+    # of .env because it is structural config, not a secret.
+    repos_config_path: str = "./repos.toml"
 
     # --- Persistence ---
     # SQLite file holding a cache of GitHub state; safe to delete and re-sync.
     database_url: str = "sqlite:///./status.db"
+
+    def load_repos(self) -> list[RepoRef]:
+        """Return the configured repositories to watch, read from ``repos_config_path``."""
+        return load_repos(self.repos_config_path)
 
 
 @lru_cache

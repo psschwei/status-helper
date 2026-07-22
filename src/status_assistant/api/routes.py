@@ -10,17 +10,38 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session
 
-from status_assistant.api.schemas import RepositoryViewOut, SyncResultOut
+from status_assistant.api.schemas import (
+    RepositoryListItemOut,
+    RepositoryViewOut,
+    SyncResultOut,
+)
+from status_assistant.config import Settings, get_settings
 from status_assistant.connectors.base import GitHubConnector
 from status_assistant.db import get_session
 from status_assistant.dependencies import get_connector
-from status_assistant.ingestion.sync import sync_repository
-from status_assistant.queries import get_repository_view
+from status_assistant.ingestion.sync import sync_all, sync_repository
+from status_assistant.queries import get_repository_view, list_repositories
 
 router = APIRouter(prefix="/api/repositories", tags=["repositories"])
 
 SessionDep = Annotated[Session, Depends(get_session)]
 ConnectorDep = Annotated[GitHubConnector, Depends(get_connector)]
+SettingsDep = Annotated[Settings, Depends(get_settings)]
+
+
+@router.get("", response_model=list[RepositoryListItemOut])
+def list_repositories_view(session: SessionDep) -> list[RepositoryListItemOut]:
+    """Return every synced repository with its open PR and issue counts (dashboard data)."""
+    return [RepositoryListItemOut.from_item(item) for item in list_repositories(session)]
+
+
+@router.post("/sync", response_model=list[SyncResultOut])
+def sync_all_repositories(
+    session: SessionDep, connector: ConnectorDep, settings: SettingsDep
+) -> list[SyncResultOut]:
+    """Fetch and persist open PRs and issues for every repository in ``repos.toml``."""
+    results = sync_all(session, connector, settings.load_repos())
+    return [SyncResultOut.model_validate(r) for r in results]
 
 
 @router.post("/{owner}/{name}/sync", response_model=SyncResultOut)

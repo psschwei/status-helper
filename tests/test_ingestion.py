@@ -7,10 +7,12 @@ GitHub: retitled items update in place, and items that have closed drop out.
 
 from sqlmodel import Session, select
 
-from status_assistant.ingestion.sync import sync_repository
-from status_assistant.models import Issue, PullRequest
+from status_assistant.ingestion.sync import sync_all, sync_repository
+from status_assistant.models import Issue, PullRequest, Repository
+from status_assistant.repos_config import RepoRef
 from tests.conftest import (
     FakeGitHubConnector,
+    FakeMultiRepoConnector,
     make_issue,
     make_pull_request,
     make_repository,
@@ -86,3 +88,37 @@ def test_resync_updates_last_synced_at(session: Session) -> None:
     second = sync_repository(session, connector, "octocat", "hello-world")
 
     assert second.last_synced_at >= first.last_synced_at
+
+
+def test_sync_all_syncs_every_configured_repo(session: Session) -> None:
+    repo_a = make_repository(id=1, owner="octocat", name="hello-world",
+                             full_name="octocat/hello-world")
+    repo_b = make_repository(id=2, owner="acme", name="api", full_name="acme/api")
+    connector = FakeMultiRepoConnector(
+        {
+            ("octocat", "hello-world"): FakeGitHubConnector(
+                repository=repo_a,
+                pull_requests=[make_pull_request(101, 1, "Add X")],
+                issues=[make_issue(201, 2, "A bug")],
+            ),
+            ("acme", "api"): FakeGitHubConnector(
+                repository=repo_b,
+                pull_requests=[
+                    make_pull_request(102, 1, "Add Y"),
+                    make_pull_request(103, 2, "Add Z"),
+                ],
+            ),
+        }
+    )
+    repos = [RepoRef(owner="octocat", name="hello-world"), RepoRef(owner="acme", name="api")]
+
+    results = sync_all(session, connector, repos)
+
+    # One result per configured repo, each with its own counts.
+    assert {r.full_name: (r.pull_requests, r.issues) for r in results} == {
+        "octocat/hello-world": (1, 1),
+        "acme/api": (2, 0),
+    }
+    # Both repositories and all their children persisted under the right repo ids.
+    assert {r.id for r in session.exec(select(Repository)).all()} == {1, 2}
+    assert {pr.repository_id for pr in session.exec(select(PullRequest)).all()} == {1, 2}

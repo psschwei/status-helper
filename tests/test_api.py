@@ -11,12 +11,14 @@ from fastapi.testclient import TestClient
 
 from tests.conftest import (
     FakeGitHubConnector,
+    FakeMultiRepoConnector,
     make_issue,
     make_pull_request,
     make_repository,
 )
 
-InstallConnector = Callable[[FakeGitHubConnector], None]
+InstallConnector = Callable[[FakeGitHubConnector | FakeMultiRepoConnector], None]
+InstallRepos = Callable[[list[tuple[str, str]]], None]
 
 REPO_PATH = "/api/repositories/octocat/hello-world"
 WEB_PATH = "/repositories/octocat/hello-world"
@@ -96,3 +98,89 @@ def test_html_page_renders_before_sync(client: TestClient) -> None:
     resp = client.get(WEB_PATH)
     assert resp.status_code == 200
     assert "hasn't been synced yet" in resp.text
+
+
+# --- Dashboard: multiple repositories ---------------------------------------------
+
+def _multi_connector() -> FakeMultiRepoConnector:
+    return FakeMultiRepoConnector(
+        {
+            ("octocat", "hello-world"): FakeGitHubConnector(
+                repository=make_repository(
+                    id=1, owner="octocat", name="hello-world",
+                    full_name="octocat/hello-world",
+                ),
+                pull_requests=[make_pull_request(101, 1, "Add feature X")],
+                issues=[make_issue(201, 2, "Bug: crash")],
+            ),
+            ("acme", "api"): FakeGitHubConnector(
+                repository=make_repository(
+                    id=2, owner="acme", name="api", full_name="acme/api",
+                ),
+                pull_requests=[
+                    make_pull_request(102, 1, "Refactor"),
+                    make_pull_request(103, 2, "Docs"),
+                ],
+            ),
+        }
+    )
+
+
+def test_sync_all_syncs_every_configured_repo(
+    client: TestClient, use_connector: InstallConnector, use_repos: InstallRepos
+) -> None:
+    use_connector(_multi_connector())
+    use_repos([("octocat", "hello-world"), ("acme", "api")])
+
+    resp = client.post("/api/repositories/sync")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert {r["full_name"] for r in body} == {"octocat/hello-world", "acme/api"}
+
+
+def test_list_repositories_returns_counts(
+    client: TestClient, use_connector: InstallConnector, use_repos: InstallRepos
+) -> None:
+    use_connector(_multi_connector())
+    use_repos([("octocat", "hello-world"), ("acme", "api")])
+    client.post("/api/repositories/sync")
+
+    resp = client.get("/api/repositories")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    counts = {
+        r["repository"]["full_name"]: (r["pull_request_count"], r["issue_count"])
+        for r in body
+    }
+    assert counts == {"octocat/hello-world": (1, 1), "acme/api": (2, 0)}
+
+
+def test_dashboard_shows_synced_and_unsynced_repos(
+    client: TestClient, use_connector: InstallConnector, use_repos: InstallRepos
+) -> None:
+    # Configure two repos but sync only one; the other is configured-but-unsynced.
+    use_connector(
+        FakeMultiRepoConnector(
+            {
+                ("octocat", "hello-world"): FakeGitHubConnector(
+                    repository=make_repository(
+                        id=1, owner="octocat", name="hello-world",
+                        full_name="octocat/hello-world",
+                    ),
+                    pull_requests=[make_pull_request(101, 1, "Add feature X")],
+                ),
+            }
+        )
+    )
+    use_repos([("octocat", "hello-world"), ("acme", "api")])
+    client.post(f"{REPO_PATH}/sync")
+
+    resp = client.get("/")
+
+    assert resp.status_code == 200
+    html = resp.text
+    assert "octocat/hello-world" in html  # synced repo
+    assert "acme/api" in html  # configured but not yet synced
+    assert "not synced" in html  # the badge on the unsynced repo

@@ -5,19 +5,29 @@ implements the ``GitHubConnector`` protocol (so no test touches GitHub), and a `
 with the app's session and connector dependencies overridden to use them.
 """
 
+import os
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 
-import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy import Engine
-from sqlmodel import Session, SQLModel, create_engine
-from sqlmodel.pool import StaticPool
+# Provide the settings the app needs *before* status_assistant.config is imported, so tests
+# are hermetic: ``get_settings()`` (called directly by the app's lifespan, not via a
+# dependency, so it can't be overridden) constructs successfully without a real ``.env`` or
+# token. The database is overridden per-test to an in-memory engine; this URL is never used.
+os.environ.setdefault("GITHUB_TOKEN", "test-token")
+os.environ.setdefault("DATABASE_URL", "sqlite://")
 
-from status_assistant.db import get_session
-from status_assistant.dependencies import get_connector
-from status_assistant.main import app
-from status_assistant.models import Issue, PullRequest, Repository
+import pytest  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+from sqlalchemy import Engine  # noqa: E402
+from sqlmodel import Session, SQLModel, create_engine  # noqa: E402
+from sqlmodel.pool import StaticPool  # noqa: E402
+
+from status_assistant.config import get_settings  # noqa: E402
+from status_assistant.db import get_session  # noqa: E402
+from status_assistant.dependencies import get_connector  # noqa: E402
+from status_assistant.main import app  # noqa: E402
+from status_assistant.models import Issue, PullRequest, Repository  # noqa: E402
+from status_assistant.repos_config import RepoRef  # noqa: E402
 
 FIXED_TIME = datetime(2026, 6, 15, 12, 0, tzinfo=UTC)
 
@@ -77,6 +87,32 @@ class FakeGitHubConnector:
 
     def list_issues(self, owner: str, name: str, *, state: str = "open") -> list[Issue]:
         return [Issue(**issue.model_dump()) for issue in self._issues]
+
+
+class FakeMultiRepoConnector:
+    """A ``GitHubConnector`` serving different canned data per ``owner/name``.
+
+    ``sync_all`` calls one connector once per configured repo, so unlike
+    ``FakeGitHubConnector`` (which returns the same repo for any owner/name) this looks the
+    request up by key. Reconstructs fresh instances per call for the same reason.
+    """
+
+    def __init__(self, repos: dict[tuple[str, str], "FakeGitHubConnector"]) -> None:
+        self._repos = repos
+
+    def _for(self, owner: str, name: str) -> "FakeGitHubConnector":
+        return self._repos[(owner, name)]
+
+    def get_repository(self, owner: str, name: str) -> Repository:
+        return self._for(owner, name).get_repository(owner, name)
+
+    def list_pull_requests(
+        self, owner: str, name: str, *, state: str = "open"
+    ) -> list[PullRequest]:
+        return self._for(owner, name).list_pull_requests(owner, name, state=state)
+
+    def list_issues(self, owner: str, name: str, *, state: str = "open") -> list[Issue]:
+        return self._for(owner, name).list_issues(owner, name, state=state)
 
 
 def make_repository(**overrides: object) -> Repository:
@@ -144,10 +180,33 @@ def client(engine: Engine) -> Iterator[TestClient]:
 
 
 @pytest.fixture
-def use_connector(client: TestClient) -> Callable[[FakeGitHubConnector], None]:
-    """Return a helper that installs a ``FakeGitHubConnector`` for the client."""
+def use_connector(
+    client: TestClient,
+) -> Callable[[FakeGitHubConnector | FakeMultiRepoConnector], None]:
+    """Return a helper that installs a fake connector for the client."""
 
-    def _install(connector: FakeGitHubConnector) -> None:
+    def _install(connector: FakeGitHubConnector | FakeMultiRepoConnector) -> None:
         app.dependency_overrides[get_connector] = lambda: connector
+
+    return _install
+
+
+@pytest.fixture
+def use_repos(client: TestClient) -> Callable[[list[tuple[str, str]]], None]:
+    """Return a helper that sets the configured (repos.toml) repositories for the client.
+
+    Overrides ``get_settings`` with a stub whose ``load_repos`` yields the given
+    ``(owner, name)`` pairs, so dashboard and sync-all routes see a controlled repo list
+    without reading a real ``.env`` or ``repos.toml``.
+    """
+
+    def _install(pairs: list[tuple[str, str]]) -> None:
+        refs = [RepoRef(owner=o, name=n) for o, n in pairs]
+
+        class _StubSettings:
+            def load_repos(self) -> list[RepoRef]:
+                return list(refs)
+
+        app.dependency_overrides[get_settings] = _StubSettings
 
     return _install

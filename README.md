@@ -11,17 +11,21 @@ blocked, and where to focus — without manually gathering status.
 This is built incrementally in vertical slices. See `AI_Engineering_Status_Assistant_Prompt.md`
 for the full product vision.
 
-## Current slice: Repository View
+## Current slice: Multiple Repositories + Home Dashboard
 
-Slice 1 is a complete, deterministic (no-LLM) path end to end:
+Everything is still deterministic (no LLM yet). The path, end to end:
 
-1. Configure **one** repository.
-2. Sync its **open pull requests** and **open issues** from the GitHub REST API.
+1. Configure **N** repositories in `repos.toml`.
+2. Sync each repository's **open pull requests** and **open issues** from the GitHub REST
+   API (per-repo, or all at once).
 3. Persist them to SQLite (an idempotent cache of GitHub state).
 4. Serve them via a JSON API.
-5. Render a simple server-side **Repository page**.
+5. Render a **home dashboard** listing every watched repository with its open-PR/issue
+   counts, and a per-repository **Repository page**.
 
-The AI summary layer (via a LiteLLM proxy) arrives in a later slice.
+Slice 1 delivered the single-repository Repository View; slice 2 makes repositories
+first-class and adds the dashboard. The AI summary layer (via a LiteLLM proxy) arrives in a
+later slice.
 
 ## Requirements
 
@@ -34,7 +38,24 @@ The AI summary layer (via a LiteLLM proxy) arrives in a later slice.
 ```bash
 uv sync --extra dev
 cp .env.example .env
-# edit .env: set GITHUB_TOKEN, REPO_OWNER, REPO_NAME (and GITHUB_BASE_URL for Enterprise)
+# edit .env: set GITHUB_TOKEN (and GITHUB_BASE_URL for Enterprise)
+# edit repos.toml: list the repositories to watch (one [[repos]] table each)
+```
+
+**Config split:** secrets and instance connection details live in `.env` (git-ignored);
+the *set of repositories to watch* lives in `repos.toml` (structural config, safe to
+commit). All repositories currently use the single GitHub instance from `.env` —
+per-repository instance selection is a later, additive change.
+
+```toml
+# repos.toml
+[[repos]]
+owner = "octocat"
+name  = "hello-world"
+
+[[repos]]
+owner = "acme"
+name  = "api"
 ```
 
 ## Run
@@ -46,14 +67,21 @@ uv run uvicorn status_assistant.main:app --reload
 Then:
 
 ```bash
-# Trigger a sync for the configured repo (owner/name in the path)
+# Sync every repository listed in repos.toml
+curl -X POST localhost:8000/api/repositories/sync
+
+# (or) sync a single repository (owner/name in the path)
 curl -X POST localhost:8000/api/repositories/<owner>/<name>/sync
 
-# Fetch the repository view as JSON
+# List all synced repositories with their open-work counts (dashboard data)
+curl localhost:8000/api/repositories
+
+# Fetch a single repository view as JSON
 curl localhost:8000/api/repositories/<owner>/<name>
 ```
 
-Open <http://localhost:8000/repositories/<owner>/<name>> for the HTML view.
+Open <http://localhost:8000/> for the home dashboard, and
+<http://localhost:8000/repositories/<owner>/<name>> for a repository's page.
 
 ## Develop
 
@@ -63,24 +91,31 @@ uv run mypy src          # type-check
 uv run pytest            # tests (no network / no token required)
 ```
 
-## Architecture (slice 1)
+## Architecture
 
 ```
+repos.toml          # the repositories to watch (structural config, committed)
 src/status_assistant/
-  config.py         # pydantic-settings Settings (env / .env)
+  config.py         # pydantic-settings Settings (env / .env) + load_repos()
+  repos_config.py   # RepoRef + load_repos(): parse/validate repos.toml (stdlib tomllib)
   db.py             # SQLite engine + session
   models.py         # SQLModel tables: Repository, PullRequest, Issue
+  dependencies.py   # get_connector_for(base_url) — connector factory (the instance seam)
   connectors/
     base.py         # GitHubConnector Protocol (the seam)
     github.py       # githubkit-backed implementation (.com + Enterprise)
   ingestion/
-    sync.py         # sync_repository(): fetch -> map -> upsert
-  queries.py        # get_repository_view() — shared by API and web
+    sync.py         # sync_repository() and sync_all(): fetch -> map -> upsert
+  queries.py        # list_repositories() + get_repository_view() — shared by API and web
   api/              # JSON endpoints + response DTOs
-  web/              # Jinja2 Repository page
+  web/              # Jinja2 dashboard + Repository page
   main.py           # FastAPI app factory
 ```
 
-The **connector** is deliberately abstracted behind a small `Protocol` so additional GitHub
-instances (and, later, other sources) can be added without touching the domain or API code.
-Repositories are first-class entities in the data model — nothing assumes a single repo.
+The **connector** is abstracted behind a small `Protocol`, and access goes through the
+`get_connector_for(base_url)` factory, so additional GitHub instances (and, later, other
+sources) can be added without touching the domain or API code. Repositories are first-class
+entities throughout — the data model, queries, and API are all keyed by repository, and the
+watched set is declared in `repos.toml` rather than hard-coded. A single global GitHub
+instance is used today; the `Repository.github_base_url` column and the connector factory
+leave multi-instance support as an additive change.
