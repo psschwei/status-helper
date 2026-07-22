@@ -1,0 +1,10 @@
+# Repositories the status assistant watches.
+#
+# This file is structural config (safe to commit) — secrets stay in .env. Add one
+# [[repos]] table per repository. All repos currently use the single GitHub instance
+# configured in .env (GITHUB_BASE_URL); per-repo instance selection arrives in a later
+# slice as an optional `instance` key here.
+
+[[repos]]
+owner = "octocat"
+name  = "hello-world"

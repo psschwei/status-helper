@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Engineering Status Assistant{% endblock %}
+
+{% block content %}
+<section class="repo-header">
+  <h1>Repositories</h1>
+  <p class="synced">Watched repositories and their open work.</p>
+</section>
+
+<section class="panel">
+  <h2>Repositories <span class="count">{{ rows | length }}</span></h2>
+  {% if rows %}
+    <table>
+      <thead>
+        <tr><th>Repository</th><th>Open PRs</th><th>Open issues</th><th>Last synced</th></tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+          <tr>
+            <td>
+              <a href="/repositories/{{ row.owner }}/{{ row.name }}">{{ row.full_name }}</a>
+              {% if not row.synced %}<span class="badge draft">not synced</span>{% endif %}
+            </td>
+            <td class="num">{{ row.pull_request_count }}</td>
+            <td class="num">{{ row.issue_count }}</td>
+            <td class="when">{{ row.last_synced_at | datetime }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="empty-list">
+      No repositories configured. Add a <code>[[repos]]</code> entry to <code>repos.toml</code>.
+    </p>
+  {% endif %}
+  <p class="hint">
+    Sync all watched repositories:
+    <code>curl -X POST localhost:8000/api/repositories/sync</code>
+  </p>
+</section>
+{% endblock %}

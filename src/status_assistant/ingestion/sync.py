@@ -12,6 +12,7 @@ correctly disappears from the active view. It's the simplest correct behavior fo
 active-only cache; incremental/closed-history strategies belong to a later slice.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -19,6 +20,7 @@ from sqlmodel import Session, col, delete
 
 from status_assistant.connectors.base import GitHubConnector
 from status_assistant.models import Issue, PullRequest
+from status_assistant.repos_config import RepoRef
 
 
 @dataclass(frozen=True)
@@ -73,3 +75,18 @@ def sync_repository(
         issues=len(issues),
         last_synced_at=now,
     )
+
+
+def sync_all(
+    session: Session,
+    connector: GitHubConnector,
+    repos: Iterable[RepoRef],
+) -> list[SyncResult]:
+    """Sync every configured repository, returning one :class:`SyncResult` each.
+
+    Each repository is synced independently via :func:`sync_repository`, which commits per
+    repository — so a failure syncing one repo does not roll back the repos already
+    persisted. This slice has a single GitHub instance, so all repos share one ``connector``;
+    resolving a connector per repository (for multiple instances) is a later, additive change.
+    """
+    return [sync_repository(session, connector, repo.owner, repo.name) for repo in repos]

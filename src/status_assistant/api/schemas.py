@@ -9,7 +9,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
 
-from status_assistant.queries import RepositoryView
+from status_assistant.queries import RepositoryListItem, RepositoryView
 
 
 class PullRequestOut(BaseModel):
@@ -45,6 +45,22 @@ class RepositoryOut(BaseModel):
     full_name: str
     html_url: str
     last_synced_at: datetime | None
+
+
+class RepositoryListItemOut(BaseModel):
+    """A dashboard row: a repository plus its open-work counts."""
+
+    repository: RepositoryOut
+    pull_request_count: int
+    issue_count: int
+
+    @classmethod
+    def from_item(cls, item: RepositoryListItem) -> "RepositoryListItemOut":
+        return cls(
+            repository=RepositoryOut.model_validate(item.repository),
+            pull_request_count=item.pull_request_count,
+            issue_count=item.issue_count,
+        )
 
 
 class RepositoryViewOut(BaseModel):
