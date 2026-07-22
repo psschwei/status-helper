@@ -4,7 +4,8 @@ The data here is a *cache* of GitHub state, so each row's primary key is GitHub'
 numeric id. That makes re-syncing an idempotent upsert-by-id: fetch the current state,
 write it over what we had, and the table converges to what GitHub reports.
 
-Fields are deliberately minimal — only what the Repository view needs. Labels, assignees,
+Fields are deliberately minimal — only what the current views need. Issue assignees are
+captured (in their own ``IssueAssignee`` table, since an issue can have many); labels,
 reviews, milestones, and body text are added in later slices when a feature needs them.
 """
 
@@ -62,3 +63,17 @@ class Issue(SQLModel, table=True):
     html_url: str
     created_at: datetime
     updated_at: datetime
+
+
+class IssueAssignee(SQLModel, table=True):
+    """A GitHub login assigned to an issue — the assignment, not the person.
+
+    An issue can have zero, one, or many assignees, which a single column on ``Issue`` can't
+    represent, so assignments live here as their own rows. The composite primary key
+    ``(issue_id, login)`` makes a given assignment unique and idempotent to re-insert. Kept
+    separate from ``Issue.author_login`` (who *opened* the issue): the Engineer view counts
+    issues *assigned* to a person, while the Repository page still shows who opened them.
+    """
+
+    issue_id: int = Field(foreign_key="issue.id", primary_key=True, index=True)
+    login: str = Field(primary_key=True)

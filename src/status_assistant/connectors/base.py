@@ -10,9 +10,24 @@ changing this interface. Supporting an entirely different source (Slack, Jira) w
 *different* protocol — this one stays GitHub-shaped on purpose.
 """
 
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from status_assistant.models import Issue, PullRequest, Repository
+
+
+@dataclass(frozen=True)
+class IssueWithAssignees:
+    """An issue paired with the logins assigned to it (zero, one, or many).
+
+    Assignees are connector-sourced data the ingestion layer needs, but an issue can have
+    many of them — so they can't be a column on ``Issue``. They ride *alongside* the issue in
+    this small type rather than on the model, which keeps them out of the stored row (and out
+    of ``Issue.model_dump()``, so the domain object round-trips cleanly).
+    """
+
+    issue: Issue
+    assignee_logins: list[str] = field(default_factory=list)
 
 
 class GitHubConnector(Protocol):
@@ -28,8 +43,10 @@ class GitHubConnector(Protocol):
         """List pull requests for a repository (open by default)."""
         ...
 
-    def list_issues(self, owner: str, name: str, *, state: str = "open") -> list[Issue]:
-        """List issues for a repository (open by default).
+    def list_issues(
+        self, owner: str, name: str, *, state: str = "open"
+    ) -> list[IssueWithAssignees]:
+        """List issues for a repository (open by default), each with its assignee logins.
 
         Implementations must exclude pull requests, which GitHub's issues endpoint
         otherwise returns alongside genuine issues.

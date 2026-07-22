@@ -14,7 +14,13 @@ from status_assistant.queries import (
     list_engineers,
     list_repositories,
 )
-from tests.conftest import FIXED_TIME, make_issue, make_pull_request, make_repository
+from tests.conftest import (
+    FIXED_TIME,
+    make_issue,
+    make_issue_assignee,
+    make_pull_request,
+    make_repository,
+)
 
 
 def test_list_repositories_reports_counts_and_order(session: Session) -> None:
@@ -46,24 +52,46 @@ def test_list_repositories_empty(session: Session) -> None:
 # --- Engineers -------------------------------------------------------------------
 
 
-def test_list_engineers_counts_across_prs_and_issues(session: Session) -> None:
+def test_list_engineers_counts_prs_by_author_and_issues_by_assignee(session: Session) -> None:
     session.add(make_repository(id=1, full_name="a/one"))
-    # alice: 2 PRs; bob: 1 PR + 1 issue; carol: 1 issue only.
+    # PRs counted by author: alice 2, bob 1.
     session.add(make_pull_request(101, 1, "P1", repository_id=1, author_login="alice"))
     session.add(make_pull_request(102, 2, "P2", repository_id=1, author_login="alice"))
     session.add(make_pull_request(103, 3, "P3", repository_id=1, author_login="bob"))
-    session.add(make_issue(201, 4, "I1", repository_id=1, author_login="bob"))
-    session.add(make_issue(202, 5, "I2", repository_id=1, author_login="carol"))
+    # Issues counted by *assignee*, not author. Author is "carol" for both (make_issue's
+    # default) but that must not give carol any credit.
+    session.add(make_issue(201, 4, "I1", repository_id=1))
+    session.add(make_issue(202, 5, "I2", repository_id=1))
+    # I1 assigned to bob; I2 assigned to both alice and dave.
+    session.add(make_issue_assignee(201, "bob"))
+    session.add(make_issue_assignee(202, "alice"))
+    session.add(make_issue_assignee(202, "dave"))
     session.commit()
 
     items = list_engineers(session)
 
-    # Ordered by login, union across both tables.
-    assert [i.login for i in items] == ["alice", "bob", "carol"]
+    # Union of PR authors and issue assignees, ordered by login. carol (author only) absent;
+    # dave (assignee only) present.
+    assert [i.login for i in items] == ["alice", "bob", "dave"]
     by_login = {i.login: i for i in items}
-    assert (by_login["alice"].pull_request_count, by_login["alice"].issue_count) == (2, 0)
+    assert (by_login["alice"].pull_request_count, by_login["alice"].issue_count) == (2, 1)
     assert (by_login["bob"].pull_request_count, by_login["bob"].issue_count) == (1, 1)
-    assert (by_login["carol"].pull_request_count, by_login["carol"].issue_count) == (0, 1)
+    # dave has no PRs, just the one co-assigned issue.
+    assert (by_login["dave"].pull_request_count, by_login["dave"].issue_count) == (0, 1)
+
+
+def test_list_engineers_issue_assigned_to_two_counts_for_both(session: Session) -> None:
+    session.add(make_repository(id=1, full_name="a/one"))
+    session.add(make_issue(201, 1, "Shared", repository_id=1))
+    session.add(make_issue_assignee(201, "alice"))
+    session.add(make_issue_assignee(201, "bob"))
+    session.commit()
+
+    by_login = {i.login: i for i in list_engineers(session)}
+
+    # The same issue is counted once for each assignee.
+    assert by_login["alice"].issue_count == 1
+    assert by_login["bob"].issue_count == 1
 
 
 def test_list_engineers_excludes_missing_logins(session: Session) -> None:
@@ -82,12 +110,49 @@ def test_list_engineers_empty(session: Session) -> None:
     assert list_engineers(session) == []
 
 
+def test_list_engineers_filters_to_allowed_logins(session: Session) -> None:
+    session.add(make_repository(id=1, full_name="a/one"))
+    session.add(make_pull_request(101, 1, "P1", repository_id=1, author_login="alice"))
+    session.add(make_pull_request(102, 2, "P2", repository_id=1, author_login="bob"))
+    session.add(make_issue(201, 3, "I1", repository_id=1))
+    session.add(make_issue_assignee(201, "carol"))
+    session.commit()
+
+    # Only alice is in the roster; bob (PR) and carol (assignee) are dropped. A roster handle
+    # with no work ("dave") simply doesn't appear.
+    items = list_engineers(session, allowed_logins={"alice", "dave"})
+
+    assert [i.login for i in items] == ["alice"]
+
+
+def test_list_engineers_none_filter_shows_everyone(session: Session) -> None:
+    session.add(make_repository(id=1, full_name="a/one"))
+    session.add(make_pull_request(101, 1, "P1", repository_id=1, author_login="alice"))
+    session.add(make_pull_request(102, 2, "P2", repository_id=1, author_login="bob"))
+    session.commit()
+
+    assert [i.login for i in list_engineers(session, allowed_logins=None)] == ["alice", "bob"]
+
+
+def test_get_engineer_view_excluded_login_is_none(session: Session) -> None:
+    session.add(make_repository(id=1, full_name="a/one"))
+    session.add(make_pull_request(101, 1, "P1", repository_id=1, author_login="bob"))
+    session.commit()
+
+    # bob has open work, but is not in the roster, so the per-engineer view is unreachable.
+    assert get_engineer_view(session, "bob", allowed_logins={"alice"}) is None
+    # ...and in the roster, it resolves normally.
+    view = get_engineer_view(session, "bob", allowed_logins={"bob"})
+    assert view is not None and view.login == "bob"
+
+
 def test_get_engineer_view_groups_work_per_repo(session: Session) -> None:
     session.add(make_repository(id=1, owner="z", name="zebra", full_name="z/zebra"))
     session.add(make_repository(id=2, owner="a", name="apple", full_name="a/apple"))
-    # alice authored work in both repos, plus an issue; bob's work must be excluded.
+    # alice: a PR in zebra and an issue *assigned* to her in apple; bob's work is excluded.
     session.add(make_pull_request(101, 1, "Z PR", repository_id=1, author_login="alice"))
-    session.add(make_issue(201, 2, "A issue", repository_id=2, author_login="alice"))
+    session.add(make_issue(201, 2, "A issue", repository_id=2))
+    session.add(make_issue_assignee(201, "alice"))
     session.add(make_pull_request(102, 3, "B PR", repository_id=1, author_login="bob"))
     session.commit()
 
@@ -102,6 +167,19 @@ def test_get_engineer_view_groups_work_per_repo(session: Session) -> None:
     assert [i.number for i in apple.issues] == [2]
     assert apple.pull_requests == []
     assert [pr.number for pr in zebra.pull_requests] == [1]
+
+
+def test_get_engineer_view_lists_assigned_not_authored_issues(session: Session) -> None:
+    session.add(make_repository(id=1, full_name="a/one"))
+    # alice authored this issue but it's assigned to bob — it belongs to bob's view, not hers.
+    session.add(make_issue(201, 1, "Bug", repository_id=1, author_login="alice"))
+    session.add(make_issue_assignee(201, "bob"))
+    session.commit()
+
+    assert get_engineer_view(session, "alice") is None
+    bob = get_engineer_view(session, "bob")
+    assert bob is not None
+    assert [i.number for i in bob.repos[0].issues] == [1]
 
 
 def test_get_engineer_view_orders_items_by_updated_desc(session: Session) -> None:

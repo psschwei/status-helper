@@ -1,0 +1,27 @@
+# Copy to engineers.toml to limit the Engineers view to a specific set of people.
+# engineers.toml is gitignored (it's your personal roster); this template is committed.
+#
+# OPTIONAL: if engineers.toml is absent (or empty), the Engineers view shows everyone
+# with open work. Add one [[engineers]] table per person to restrict it to that roster.
+#
+# This file is structural config (no secrets — tokens stay in .env).
+#
+# An engineer is a *person*, identified by their GitHub handle(s). Today all handles live
+# on the single instance configured in .env, so a flat `handles` list is all you need:
+
+[[engineers]]
+name    = "Octo Cat"        # optional display name (not shown yet; reserved for later)
+handles = ["octocat"]
+
+[[engineers]]
+handles = ["your-handle"]
+
+# When multiple GitHub instances are supported, the same person may have a different handle
+# on each. Map them per instance (keyed by GITHUB_BASE_URL); this is parsed today but not
+# yet used for matching:
+#
+# [[engineers]]
+# name    = "Octo Cat"
+# handles = ["octocat"]                         # shorthand for the default instance
+# [engineers.handles_by_instance]
+# "https://ghe.example.com/api/v3" = "octo-cat"

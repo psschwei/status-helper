@@ -11,6 +11,7 @@ from functools import lru_cache
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from status_assistant.engineers_config import EngineerRef, load_engineers
 from status_assistant.repos_config import RepoRef, load_repos
 
 
@@ -40,6 +41,12 @@ class Settings(BaseSettings):
     # of .env because it is structural config, not a secret.
     repos_config_path: str = "./repos.toml"
 
+    # --- The engineers to show (optional roster) ---
+    # Path to the TOML file listing which engineers appear in the Engineers view (see
+    # engineers_config / engineers.toml). Optional: a missing file means "show everyone".
+    # Kept out of .env because it is structural config, not a secret.
+    engineers_config_path: str = "./engineers.toml"
+
     # --- Persistence ---
     # SQLite file holding a cache of GitHub state; safe to delete and re-sync.
     database_url: str = "sqlite:///./status.db"
@@ -47,6 +54,10 @@ class Settings(BaseSettings):
     def load_repos(self) -> list[RepoRef]:
         """Return the configured repositories to watch, read from ``repos_config_path``."""
         return load_repos(self.repos_config_path)
+
+    def load_engineers(self) -> list[EngineerRef]:
+        """Return the engineer roster, read from ``engineers_config_path`` (``[]`` if none)."""
+        return load_engineers(self.engineers_config_path)
 
 
 @lru_cache

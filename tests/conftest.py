@@ -23,10 +23,17 @@ from sqlmodel import Session, SQLModel, create_engine  # noqa: E402
 from sqlmodel.pool import StaticPool  # noqa: E402
 
 from status_assistant.config import get_settings  # noqa: E402
+from status_assistant.connectors.base import IssueWithAssignees  # noqa: E402
 from status_assistant.db import get_session  # noqa: E402
 from status_assistant.dependencies import get_connector  # noqa: E402
+from status_assistant.engineers_config import EngineerRef  # noqa: E402
 from status_assistant.main import app  # noqa: E402
-from status_assistant.models import Issue, PullRequest, Repository  # noqa: E402
+from status_assistant.models import (  # noqa: E402
+    Issue,
+    IssueAssignee,
+    PullRequest,
+    Repository,
+)
 from status_assistant.repos_config import RepoRef  # noqa: E402
 
 FIXED_TIME = datetime(2026, 6, 15, 12, 0, tzinfo=UTC)
@@ -68,10 +75,15 @@ class FakeGitHubConnector:
         repository: Repository,
         pull_requests: list[PullRequest] | None = None,
         issues: list[Issue] | None = None,
+        assignees: dict[int, list[str]] | None = None,
     ) -> None:
         self._repository = repository
         self._pull_requests = pull_requests or []
         self._issues = issues or []
+        # Canned assignee logins keyed by issue id. Kept parallel to ``issues`` (rather than
+        # on the Issue objects) because assignees ride *alongside* the issue in the real
+        # connector too — and a private attr on Issue wouldn't survive model_dump() below.
+        self._assignees = assignees or {}
 
     # Rebuild fresh instances from field values on every call. A real connector returns new
     # objects each time; more importantly, ``model_copy()`` on a SQLModel *table* instance
@@ -85,8 +97,16 @@ class FakeGitHubConnector:
     ) -> list[PullRequest]:
         return [PullRequest(**pr.model_dump()) for pr in self._pull_requests]
 
-    def list_issues(self, owner: str, name: str, *, state: str = "open") -> list[Issue]:
-        return [Issue(**issue.model_dump()) for issue in self._issues]
+    def list_issues(
+        self, owner: str, name: str, *, state: str = "open"
+    ) -> list[IssueWithAssignees]:
+        return [
+            IssueWithAssignees(
+                issue=Issue(**issue.model_dump()),
+                assignee_logins=list(self._assignees.get(issue.id, [])),
+            )
+            for issue in self._issues
+        ]
 
 
 class FakeMultiRepoConnector:
@@ -111,7 +131,9 @@ class FakeMultiRepoConnector:
     ) -> list[PullRequest]:
         return self._for(owner, name).list_pull_requests(owner, name, state=state)
 
-    def list_issues(self, owner: str, name: str, *, state: str = "open") -> list[Issue]:
+    def list_issues(
+        self, owner: str, name: str, *, state: str = "open"
+    ) -> list[IssueWithAssignees]:
         return self._for(owner, name).list_issues(owner, name, state=state)
 
 
@@ -161,6 +183,10 @@ def make_issue(issue_id: int, number: int, title: str, **overrides: object) -> I
     return Issue(**defaults)
 
 
+def make_issue_assignee(issue_id: int, login: str) -> IssueAssignee:
+    return IssueAssignee(issue_id=issue_id, login=login)
+
+
 @pytest.fixture
 def client(engine: Engine) -> Iterator[TestClient]:
     """A ``TestClient`` whose DB session is bound to the in-memory ``engine``.
@@ -191,6 +217,43 @@ def use_connector(
     return _install
 
 
+class _StubSettings:
+    """A stand-in for ``Settings`` carrying just the config the routes read.
+
+    Shared by ``use_repos`` and ``use_engineers`` so a test can install both without one
+    clobbering the other's ``get_settings`` override. Defaults are empty: no repos, and an
+    empty roster (which means "show everyone" — no filter).
+    """
+
+    def __init__(self) -> None:
+        self.repos: list[RepoRef] = []
+        self.engineers: list[EngineerRef] = []
+
+    def load_repos(self) -> list[RepoRef]:
+        return list(self.repos)
+
+    def load_engineers(self) -> list[EngineerRef]:
+        return list(self.engineers)
+
+    def __call__(self) -> "_StubSettings":
+        # FastAPI resolves a dependency override by calling it; a stub instance returns
+        # itself so a single mutable stub backs the whole request.
+        return self
+
+
+def _stub_settings() -> _StubSettings:
+    """Return the installed stub settings, installing one on first use.
+
+    Idempotent so ``use_repos`` and ``use_engineers`` compose: both mutate the same stub.
+    """
+    override = app.dependency_overrides.get(get_settings)
+    if isinstance(override, _StubSettings):
+        return override
+    stub = _StubSettings()
+    app.dependency_overrides[get_settings] = stub
+    return stub
+
+
 @pytest.fixture
 def use_repos(client: TestClient) -> Callable[[list[tuple[str, str]]], None]:
     """Return a helper that sets the configured (repos.toml) repositories for the client.
@@ -201,12 +264,20 @@ def use_repos(client: TestClient) -> Callable[[list[tuple[str, str]]], None]:
     """
 
     def _install(pairs: list[tuple[str, str]]) -> None:
-        refs = [RepoRef(owner=o, name=n) for o, n in pairs]
+        _stub_settings().repos = [RepoRef(owner=o, name=n) for o, n in pairs]
 
-        class _StubSettings:
-            def load_repos(self) -> list[RepoRef]:
-                return list(refs)
+    return _install
 
-        app.dependency_overrides[get_settings] = _StubSettings
+
+@pytest.fixture
+def use_engineers(client: TestClient) -> Callable[[list[EngineerRef]], None]:
+    """Return a helper that sets the engineer roster (engineers.toml) for the client.
+
+    Overrides ``get_settings`` with a stub whose ``load_engineers`` yields the given roster,
+    so the Engineers routes apply the filter without reading a real ``engineers.toml``.
+    """
+
+    def _install(engineers: list[EngineerRef]) -> None:
+        _stub_settings().engineers = list(engineers)
 
     return _install

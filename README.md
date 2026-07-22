@@ -26,11 +26,11 @@ Everything is still deterministic (no LLM yet). The path, end to end:
 
 Slice 1 delivered the single-repository Repository View; slice 2 made repositories
 first-class and added the dashboard; slice 3 adds the Engineer View. Engineers are a
-*derived* axis — computed from the `author_login` already stored on PRs and issues — so this
-slice added no new table, ingestion, or config, only a read-side query plus an API route and
-page. It intentionally shows only **open, authored** work: reviews, "reviews owed", blockers,
-and completed work depend on data not yet ingested, and the AI summary layer (via a LiteLLM
-proxy) all arrive in later slices.
+*derived* axis, computed from what's already cached: a PR belongs to whoever **opened** it
+(`author_login`), while an issue belongs to whoever it is **assigned** to (the
+`IssueAssignee` table — an issue can have several assignees, so it counts for each). Reviews,
+"reviews owed", blockers, and completed work depend on data not yet ingested, and the AI
+summary layer (via a LiteLLM proxy) all arrive in later slices.
 
 ## Requirements
 
@@ -64,6 +64,20 @@ name  = "hello-world"
 [[repos]]
 owner = "acme"
 name  = "api"
+```
+
+**Engineer roster (optional):** to limit the Engineers view to specific people, copy
+`engineers.toml.example` to `engineers.toml` and list one `[[engineers]]` table per person.
+With no `engineers.toml`, the view shows everyone with open work. An engineer is a *person*
+identified by their GitHub handle(s); the schema reserves a per-instance handle map so that
+when multiple GitHub instances are supported, one person's differing handles can be mapped
+without a rewrite.
+
+```toml
+# engineers.toml
+[[engineers]]
+name    = "Octo Cat"    # optional display name
+handles = ["octocat"]
 ```
 
 ## Run
@@ -114,11 +128,13 @@ uv run pytest            # tests (no network / no token required)
 
 ```
 repos.toml          # the repositories to watch (structural config, git-ignored; copy from repos.toml.example)
+engineers.toml      # optional engineer roster for the Engineers view (git-ignored; copy from engineers.toml.example)
 src/status_assistant/
-  config.py         # pydantic-settings Settings (env / .env) + load_repos()
+  config.py         # pydantic-settings Settings (env / .env) + load_repos() + load_engineers()
   repos_config.py   # RepoRef + load_repos(): parse/validate repos.toml (stdlib tomllib)
+  engineers_config.py # EngineerRef + load_engineers()/allowed_logins(): optional roster filter
   db.py             # SQLite engine + session
-  models.py         # SQLModel tables: Repository, PullRequest, Issue
+  models.py         # SQLModel tables: Repository, PullRequest, Issue, IssueAssignee
   dependencies.py   # get_connector_for(base_url) — connector factory (the instance seam)
   connectors/
     base.py         # GitHubConnector Protocol (the seam)
@@ -139,8 +155,9 @@ watched set is declared in `repos.toml` rather than hard-coded. A single global 
 instance is used today; the `Repository.github_base_url` column and the connector factory
 leave multi-instance support as an additive change.
 
-**Engineers** are a *derived* axis, not a stored entity: they're computed from the
-`author_login` on the PRs and issues already cached, so the Engineer View is pure read-side
-(a query, a router, and pages) with no schema, ingestion, or config change. A GitHub login is
-treated as the identity; a first-class identity model is only warranted once identities are
-correlated across sources (Slack/Jira), so it's deferred.
+**Engineers** are a *derived* axis, not a stored entity: they're computed from what's already
+cached — PRs by their `author_login`, issues by their assignees (`IssueAssignee`) — so the
+Engineer View is mostly read-side (a query, a router, and pages). The one stored addition is
+the assignee join table, because an issue's assignees are many-valued and can't live on the
+issue row. A GitHub login is treated as the identity; a first-class identity model is only
+warranted once identities are correlated across sources (Slack/Jira), so it's deferred.

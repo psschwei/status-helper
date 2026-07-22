@@ -41,6 +41,30 @@ a:hover { text-decoration: underline; }
 .repo-header h1 { margin: 0 0 0.25rem; font-size: 1.5rem; }
 .synced { color: var(--muted); margin: 0 0 1.5rem; font-size: 0.9rem; }
 
+/* Header with a title block on the left and an action (e.g. Sync all) on the right. */
+.page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.page-header .synced { margin-bottom: 0; }
+
+.btn {
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: #fff;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 0.4rem 0.9rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn:hover { filter: brightness(1.08); }
+.btn:disabled { opacity: 0.6; cursor: default; }
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--border);

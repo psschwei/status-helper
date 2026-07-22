@@ -11,12 +11,16 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlmodel import Session
 
 from status_assistant.config import Settings, get_settings
+from status_assistant.connectors.base import GitHubConnector
 from status_assistant.db import get_session
+from status_assistant.dependencies import get_connector
+from status_assistant.engineers_config import allowed_logins
+from status_assistant.ingestion.sync import sync_all
 from status_assistant.queries import (
     get_engineer_view,
     get_repository_view,
@@ -41,6 +45,7 @@ router = APIRouter(tags=["web"])
 
 SessionDep = Annotated[Session, Depends(get_session)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
+ConnectorDep = Annotated[GitHubConnector, Depends(get_connector)]
 
 
 @dataclass(frozen=True)
@@ -112,6 +117,21 @@ def dashboard(request: Request, session: SessionDep, settings: SettingsDep) -> H
     )
 
 
+@router.post("/sync")
+def sync_all_repositories(
+    session: SessionDep, connector: ConnectorDep, settings: SettingsDep
+) -> RedirectResponse:
+    """Sync every watched repository, then redirect back to the dashboard.
+
+    Backs the dashboard's "Sync all" button. This is a plain form POST that runs the sync
+    synchronously (the same ``sync_all`` the JSON API uses) and follows the
+    POST-redirect-GET pattern: on success it 303-redirects to ``/`` so a refresh doesn't
+    re-submit and the reloaded dashboard shows the fresh counts and last-synced times.
+    """
+    sync_all(session, connector, settings.load_repos())
+    return RedirectResponse(url="/", status_code=303)
+
+
 @router.get("/repositories/{owner}/{name}", response_class=HTMLResponse)
 def repository_page(owner: str, name: str, request: Request, session: SessionDep) -> HTMLResponse:
     view = get_repository_view(session, owner, name)
@@ -123,23 +143,32 @@ def repository_page(owner: str, name: str, request: Request, session: SessionDep
 
 
 @router.get("/engineers", response_class=HTMLResponse)
-def engineers_page(request: Request, session: SessionDep) -> HTMLResponse:
-    """Engineer directory: everyone with open work, and their open-work counts."""
+def engineers_page(request: Request, session: SessionDep, settings: SettingsDep) -> HTMLResponse:
+    """Engineer directory: everyone with open work, and their open-work counts.
+
+    Limited to the configured engineer roster when one exists (``engineers.toml``); with no
+    roster, shows everyone.
+    """
+    allowed = allowed_logins(settings.load_engineers())
     return templates.TemplateResponse(
         request,
         "engineers.html",
-        {"engineers": list_engineers(session)},
+        {"engineers": list_engineers(session, allowed)},
     )
 
 
 @router.get("/engineers/{login}", response_class=HTMLResponse)
-def engineer_page(login: str, request: Request, session: SessionDep) -> HTMLResponse:
+def engineer_page(
+    login: str, request: Request, session: SessionDep, settings: SettingsDep
+) -> HTMLResponse:
     """Per-engineer page: their open PRs and issues grouped by repository.
 
-    A login with no open work returns 200 with a friendly empty state (same convention as
-    an un-synced repository page) rather than a 404 in the browser.
+    A login with no open work — or one excluded by the engineer roster — returns 200 with a
+    friendly empty state (same convention as an un-synced repository page) rather than a 404
+    in the browser.
     """
-    view = get_engineer_view(session, login)
+    allowed = allowed_logins(settings.load_engineers())
+    view = get_engineer_view(session, login, allowed)
     return templates.TemplateResponse(
         request,
         "engineer.html",

@@ -12,6 +12,7 @@ from typing import Any
 
 from githubkit import GitHub
 
+from status_assistant.connectors.base import IssueWithAssignees
 from status_assistant.models import Issue, PullRequest, Repository
 
 
@@ -24,6 +25,17 @@ def _author_login(user: Any) -> str | None:
     if not user:
         return None
     return getattr(user, "login", None)
+
+
+def _assignee_logins(item: Any) -> list[str]:
+    """Extract the logins of everyone assigned to an issue.
+
+    GitHub exposes both a singular ``assignee`` and a plural ``assignees``; ``assignees`` is
+    the superset (it includes the singular one), so we map from it. Null / ghost entries are
+    dropped the same defensive way as :func:`_author_login`.
+    """
+    assignees = getattr(item, "assignees", None) or []
+    return [login for user in assignees if (login := _author_login(user))]
 
 
 def _to_datetime(value: Any) -> datetime:
@@ -95,27 +107,30 @@ class GitHubKitConnector:
 
     # --- Issues -------------------------------------------------------------------
 
-    def list_issues(self, owner: str, name: str, *, state: str = "open") -> list[Issue]:
+    def list_issues(
+        self, owner: str, name: str, *, state: str = "open"
+    ) -> list[IssueWithAssignees]:
         raw = self._paginate(
             self._github.rest.issues.list_for_repo, owner=owner, repo=name, state=state
         )
-        issues: list[Issue] = []
+        issues: list[IssueWithAssignees] = []
         for item in raw:
             # GitHub's issues endpoint also returns pull requests; a genuine issue has no
             # ``pull_request`` field. Skip the PR-flavored ones so a PR is never stored twice.
             if getattr(item, "pull_request", None):
                 continue
+            issue = Issue(
+                id=item.id,
+                number=item.number,
+                repository_id=0,  # filled in by ingestion
+                title=item.title,
+                state=item.state,
+                author_login=_author_login(item.user),
+                html_url=item.html_url,
+                created_at=_to_datetime(item.created_at),
+                updated_at=_to_datetime(item.updated_at),
+            )
             issues.append(
-                Issue(
-                    id=item.id,
-                    number=item.number,
-                    repository_id=0,  # filled in by ingestion
-                    title=item.title,
-                    state=item.state,
-                    author_login=_author_login(item.user),
-                    html_url=item.html_url,
-                    created_at=_to_datetime(item.created_at),
-                    updated_at=_to_datetime(item.updated_at),
-                )
+                IssueWithAssignees(issue=issue, assignee_logins=_assignee_logins(item))
             )
         return issues

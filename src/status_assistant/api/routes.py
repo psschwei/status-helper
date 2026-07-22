@@ -21,6 +21,7 @@ from status_assistant.config import Settings, get_settings
 from status_assistant.connectors.base import GitHubConnector
 from status_assistant.db import get_session
 from status_assistant.dependencies import get_connector
+from status_assistant.engineers_config import allowed_logins
 from status_assistant.ingestion.sync import sync_all, sync_repository
 from status_assistant.queries import (
     get_engineer_view,
@@ -80,19 +81,24 @@ engineers_router = APIRouter(prefix="/api/engineers", tags=["engineers"])
 
 
 @engineers_router.get("", response_model=list[EngineerListItemOut])
-def list_engineers_view(session: SessionDep) -> list[EngineerListItemOut]:
-    """Return every engineer with open work, with their open PR and issue counts."""
-    return [EngineerListItemOut.from_item(item) for item in list_engineers(session)]
+def list_engineers_view(session: SessionDep, settings: SettingsDep) -> list[EngineerListItemOut]:
+    """Return every engineer with open work, with their open PR and issue counts.
+
+    Limited to the configured engineer roster (``engineers.toml``) when one exists.
+    """
+    allowed = allowed_logins(settings.load_engineers())
+    return [EngineerListItemOut.from_item(item) for item in list_engineers(session, allowed)]
 
 
 @engineers_router.get("/{login}", response_model=EngineerViewOut)
-def engineer_view(login: str, session: SessionDep) -> EngineerViewOut:
+def engineer_view(login: str, session: SessionDep, settings: SettingsDep) -> EngineerViewOut:
     """Return an engineer's open PRs and issues, grouped by repository.
 
-    404 if the login has no open work in the cache — either they have none, or the relevant
-    repositories haven't been synced yet.
+    404 if the login has no open work in the cache — either they have none, the relevant
+    repositories haven't been synced yet, or they are excluded by the engineer roster.
     """
-    view = get_engineer_view(session, login)
+    allowed = allowed_logins(settings.load_engineers())
+    view = get_engineer_view(session, login, allowed)
     if view is None:
         raise HTTPException(
             status_code=404,

@@ -2,9 +2,16 @@
 {% block title %}Dashboard — Engineering Status Assistant{% endblock %}
 
 {% block content %}
-<section class="repo-header">
-  <h1>Repositories</h1>
-  <p class="synced">Watched repositories and their open work.</p>
+<section class="repo-header page-header">
+  <div>
+    <h1>Repositories</h1>
+    <p class="synced">Watched repositories and their open work.</p>
+  </div>
+  {% if rows %}
+    <form method="post" action="/sync">
+      <button type="submit" class="btn">Sync all</button>
+    </form>
+  {% endif %}
 </section>
 
 <section class="panel">
@@ -34,8 +41,8 @@
     </p>
   {% endif %}
   <p class="hint">
-    Sync all watched repositories:
-    <code>curl -X POST localhost:8000/api/repositories/sync</code>
+    Use <strong>Sync all</strong> above to fetch the latest open work from GitHub, or
+    <code>curl -X POST localhost:8000/api/repositories/sync</code>.
   </p>
 </section>
 {% endblock %}

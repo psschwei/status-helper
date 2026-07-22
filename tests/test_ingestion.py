@@ -8,7 +8,7 @@ GitHub: retitled items update in place, and items that have closed drop out.
 from sqlmodel import Session, select
 
 from status_assistant.ingestion.sync import sync_all, sync_repository
-from status_assistant.models import Issue, PullRequest, Repository
+from status_assistant.models import Issue, IssueAssignee, PullRequest, Repository
 from status_assistant.repos_config import RepoRef
 from tests.conftest import (
     FakeGitHubConnector,
@@ -79,6 +79,51 @@ def test_resync_is_idempotent_and_reflects_current_state(session: Session) -> No
     assert prs[102].title == "Add Y (renamed)"
     assert 101 not in prs  # closed PR dropped from the active cache
     assert issues == []  # closed issue dropped
+
+
+def test_sync_persists_issue_assignees(session: Session) -> None:
+    connector = FakeGitHubConnector(
+        repository=make_repository(),
+        issues=[make_issue(201, 3, "A bug"), make_issue(202, 4, "Unassigned")],
+        # Issue 201 has two assignees; issue 202 has none.
+        assignees={201: ["dave", "erin"]},
+    )
+
+    sync_repository(session, connector, "octocat", "hello-world")
+
+    rows = session.exec(select(IssueAssignee)).all()
+    assert {(r.issue_id, r.login) for r in rows} == {(201, "dave"), (201, "erin")}
+    # The unassigned issue produces no assignee rows.
+    assert all(r.issue_id != 202 for r in rows)
+
+
+def test_resync_replaces_issue_assignees(session: Session) -> None:
+    repo = make_repository()
+
+    sync_repository(
+        session,
+        FakeGitHubConnector(
+            repository=repo,
+            issues=[make_issue(201, 3, "A bug")],
+            assignees={201: ["dave", "erin"]},
+        ),
+        "octocat",
+        "hello-world",
+    )
+    # Second sync: assignment changed to just frank; dave/erin must not linger.
+    sync_repository(
+        session,
+        FakeGitHubConnector(
+            repository=repo,
+            issues=[make_issue(201, 3, "A bug")],
+            assignees={201: ["frank"]},
+        ),
+        "octocat",
+        "hello-world",
+    )
+
+    rows = session.exec(select(IssueAssignee)).all()
+    assert {(r.issue_id, r.login) for r in rows} == {(201, "frank")}
 
 
 def test_resync_updates_last_synced_at(session: Session) -> None:

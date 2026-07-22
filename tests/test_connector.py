@@ -67,11 +67,14 @@ class _FakeGitHub:
             return [
                 ns(id=201, number=3, title="Bug: crash on save", state="open",
                    user=ns(login="carol"), html_url="https://x/issues/3",
-                   created_at=NOW, updated_at=NOW, pull_request=None),
+                   created_at=NOW, updated_at=NOW, pull_request=None,
+                   # Two assignees plus a ghost/null one that must be dropped.
+                   assignees=[ns(login="dave"), None, ns(login="erin")]),
                 # A pull request returned by the issues endpoint — must be filtered out.
                 ns(id=101, number=1, title="Add feature X", state="open",
                    user=ns(login="alice"), html_url="https://x/issues/1",
-                   created_at=NOW, updated_at=NOW, pull_request=ns(url="https://x")),
+                   created_at=NOW, updated_at=NOW, pull_request=ns(url="https://x"),
+                   assignees=[]),
             ]
         return []
 
@@ -110,10 +113,16 @@ def test_list_issues_excludes_pull_requests(connector: GitHubKitConnector) -> No
     """The critical GitHub quirk: /issues returns PRs too; we must drop them."""
     issues = connector.list_issues("octocat", "hello-world")
     assert len(issues) == 1
-    assert issues[0].id == 201
-    assert issues[0].title == "Bug: crash on save"
+    assert issues[0].issue.id == 201
+    assert issues[0].issue.title == "Bug: crash on save"
     # The PR-flavored item (id 101) must not appear as an issue.
-    assert 101 not in {issue.id for issue in issues}
+    assert 101 not in {iwa.issue.id for iwa in issues}
+
+
+def test_list_issues_maps_assignees_and_drops_ghosts(connector: GitHubKitConnector) -> None:
+    """Assignees come from the plural ``assignees`` array; null/ghost entries are dropped."""
+    issues = connector.list_issues("octocat", "hello-world")
+    assert issues[0].assignee_logins == ["dave", "erin"]
 
 
 def test_enterprise_base_url_is_passed_to_client(monkeypatch: pytest.MonkeyPatch) -> None:

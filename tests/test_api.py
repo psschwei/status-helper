@@ -9,6 +9,7 @@ from collections.abc import Callable
 
 from fastapi.testclient import TestClient
 
+from status_assistant.engineers_config import EngineerRef
 from tests.conftest import (
     FakeGitHubConnector,
     FakeMultiRepoConnector,
@@ -19,6 +20,7 @@ from tests.conftest import (
 
 InstallConnector = Callable[[FakeGitHubConnector | FakeMultiRepoConnector], None]
 InstallRepos = Callable[[list[tuple[str, str]]], None]
+InstallEngineers = Callable[[list[EngineerRef]], None]
 
 REPO_PATH = "/api/repositories/octocat/hello-world"
 WEB_PATH = "/repositories/octocat/hello-world"
@@ -112,6 +114,8 @@ def _multi_connector() -> FakeMultiRepoConnector:
                 ),
                 pull_requests=[make_pull_request(101, 1, "Add feature X")],
                 issues=[make_issue(201, 2, "Bug: crash")],
+                # The issue is *assigned* to carol (that's what the engineer view counts).
+                assignees={201: ["carol"]},
             ),
             ("acme", "api"): FakeGitHubConnector(
                 repository=make_repository(
@@ -186,10 +190,47 @@ def test_dashboard_shows_synced_and_unsynced_repos(
     assert "not synced" in html  # the badge on the unsynced repo
 
 
+def test_dashboard_has_sync_button(
+    client: TestClient, use_connector: InstallConnector, use_repos: InstallRepos
+) -> None:
+    use_connector(_multi_connector())
+    use_repos([("octocat", "hello-world")])
+
+    html = client.get("/").text
+
+    # The "Sync all" button posts to the web sync route.
+    assert 'action="/sync"' in html
+    assert "Sync all" in html
+
+
+def test_web_sync_button_syncs_and_redirects(
+    client: TestClient, use_connector: InstallConnector, use_repos: InstallRepos
+) -> None:
+    use_connector(_multi_connector())
+    use_repos([("octocat", "hello-world"), ("acme", "api")])
+
+    # POST-redirect-GET: the button posts to /sync, which 303s back to the dashboard.
+    resp = client.post("/sync", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/"
+
+    # The sync actually persisted data: the dashboard now shows both repos' open work.
+    dashboard = client.get("/")
+    assert "octocat/hello-world" in dashboard.text
+    assert "acme/api" in dashboard.text
+    # And it's queryable via the read side.
+    counts = {
+        r["repository"]["full_name"]: (r["pull_request_count"], r["issue_count"])
+        for r in client.get("/api/repositories").json()
+    }
+    assert counts == {"octocat/hello-world": (1, 1), "acme/api": (2, 0)}
+
+
 # --- Engineers -------------------------------------------------------------------
 
-# In _multi_connector, make_pull_request defaults author to "alice" and make_issue to
-# "carol": alice authors PRs in both repos, carol authors the one issue.
+# In _multi_connector, make_pull_request defaults author to "alice": alice authors PRs in
+# both repos. The one issue (id 201) is *assigned* to carol — the engineer view counts issues
+# by assignee, so carol gets the issue even though make_issue's default author is also "carol".
 
 
 def test_list_engineers_endpoint(
@@ -239,6 +280,29 @@ def test_engineer_view_404_for_unknown_login(
     assert "nobody" in resp.json()["detail"]
 
 
+def test_engineer_issues_are_by_assignee_not_author(
+    client: TestClient, use_connector: InstallConnector, use_repos: InstallRepos
+) -> None:
+    """An issue authored by one person but assigned to another belongs to the assignee."""
+    use_connector(
+        FakeGitHubConnector(
+            repository=make_repository(id=1, owner="octocat", name="hello-world",
+                                       full_name="octocat/hello-world"),
+            # Authored by alice (make_issue default is "carol", override it), assigned to bob.
+            issues=[make_issue(201, 1, "Bug", author_login="alice")],
+            assignees={201: ["bob"]},
+        )
+    )
+    use_repos([("octocat", "hello-world")])
+    client.post("/api/repositories/sync")
+
+    # bob (assignee) has the issue; alice (author) does not.
+    bob = client.get("/api/engineers/bob")
+    assert bob.status_code == 200
+    assert bob.json()["issue_count"] == 1
+    assert client.get("/api/engineers/alice").status_code == 404
+
+
 def test_engineers_html_pages_render(
     client: TestClient, use_connector: InstallConnector, use_repos: InstallRepos
 ) -> None:
@@ -261,3 +325,44 @@ def test_engineer_html_page_empty_state(client: TestClient) -> None:
     resp = client.get("/engineers/nobody")
     assert resp.status_code == 200
     assert "No open work" in resp.text
+
+
+def test_engineers_endpoint_filtered_by_roster(
+    client: TestClient,
+    use_connector: InstallConnector,
+    use_repos: InstallRepos,
+    use_engineers: InstallEngineers,
+) -> None:
+    use_connector(_multi_connector())
+    use_repos([("octocat", "hello-world"), ("acme", "api")])
+    # Roster includes only alice; carol has work but is excluded.
+    use_engineers([EngineerRef(name="Alice", handles=["alice"])])
+    client.post("/api/repositories/sync")
+
+    listed = client.get("/api/engineers")
+    assert [e["login"] for e in listed.json()] == ["alice"]
+
+    # alice (in roster) resolves; carol (excluded) 404s even though she has open work.
+    assert client.get("/api/engineers/alice").status_code == 200
+    assert client.get("/api/engineers/carol").status_code == 404
+
+
+def test_engineers_page_filtered_by_roster(
+    client: TestClient,
+    use_connector: InstallConnector,
+    use_repos: InstallRepos,
+    use_engineers: InstallEngineers,
+) -> None:
+    use_connector(_multi_connector())
+    use_repos([("octocat", "hello-world"), ("acme", "api")])
+    use_engineers([EngineerRef(handles=["alice"])])
+    client.post("/api/repositories/sync")
+
+    directory = client.get("/engineers")
+    assert "alice" in directory.text
+    assert "carol" not in directory.text
+
+    # An excluded engineer's page shows the friendly empty state, not their work.
+    page = client.get("/engineers/carol")
+    assert page.status_code == 200
+    assert "No open work found" in page.text

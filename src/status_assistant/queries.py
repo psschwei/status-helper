@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from sqlmodel import Session, col, func, select
 
-from status_assistant.models import Issue, PullRequest, Repository
+from status_assistant.models import Issue, IssueAssignee, PullRequest, Repository
 
 
 @dataclass(frozen=True)
@@ -107,28 +107,48 @@ class EngineerListItem:
     issue_count: int
 
 
-def list_engineers(session: Session) -> list[EngineerListItem]:
+def list_engineers(
+    session: Session, allowed_logins: set[str] | None = None
+) -> list[EngineerListItem]:
     """Return every engineer with open work, with their open PR and issue counts.
 
-    An "engineer" is not a stored entity — it's derived from ``author_login`` on the open PRs
-    and issues we already cache. Logins are the union across both tables (someone may have
-    only issues, or only PRs), and rows with a missing/blank login are skipped since they
-    can't be attributed to a person. Counts come from two grouped aggregates (one per child
-    table), merged in Python — a fixed number of queries regardless of engineer count.
+    An "engineer" is not a stored entity — it's derived from the open work we already cache.
+    Two different notions of "their work": a PR is counted by who *opened* it
+    (``PullRequest.author_login``), while an issue is counted by who it is *assigned* to
+    (``IssueAssignee.login``) — so an issue assigned to two people counts for both, and an
+    unassigned issue counts for no one. Logins are the union across the two, and blank logins
+    are skipped since they can't be attributed to a person. Counts come from two grouped
+    aggregates merged in Python — a fixed number of queries regardless of engineer count.
     Ordered by login for a stable list.
+
+    When ``allowed_logins`` is given, only those logins are returned — this is the engineer
+    roster filter (see ``engineers_config``). ``None`` (the default) means no filter: show
+    everyone. Matching is on the flat handle set for now; when multiple GitHub instances are
+    supported it becomes ``(github_base_url, login)``-aware, joining on the instance already
+    recorded on ``Repository.github_base_url``.
     """
 
-    def _counts_by_login(model: type[PullRequest] | type[Issue]) -> dict[str, int]:
+    def _pr_counts_by_author() -> dict[str, int]:
         rows = session.exec(
-            select(model.author_login, func.count())
-            .where(col(model.author_login).is_not(None))
-            .group_by(col(model.author_login))
+            select(PullRequest.author_login, func.count())
+            .where(col(PullRequest.author_login).is_not(None))
+            .group_by(col(PullRequest.author_login))
         ).all()
         # Guard against blank logins too; ``is_not(None)`` won't catch an empty string.
         return {login: count for login, count in rows if login}
 
-    pr_counts = _counts_by_login(PullRequest)
-    issue_counts = _counts_by_login(Issue)
+    def _issue_counts_by_assignee() -> dict[str, int]:
+        rows = session.exec(
+            select(IssueAssignee.login, func.count()).group_by(col(IssueAssignee.login))
+        ).all()
+        return {login: count for login, count in rows if login}
+
+    pr_counts = _pr_counts_by_author()
+    issue_counts = _issue_counts_by_assignee()
+
+    logins = pr_counts.keys() | issue_counts.keys()
+    if allowed_logins is not None:
+        logins &= allowed_logins
 
     return [
         EngineerListItem(
@@ -136,7 +156,7 @@ def list_engineers(session: Session) -> list[EngineerListItem]:
             pull_request_count=pr_counts.get(login, 0),
             issue_count=issue_counts.get(login, 0),
         )
-        for login in sorted(pr_counts.keys() | issue_counts.keys())
+        for login in sorted(logins)
     ]
 
 
@@ -165,14 +185,25 @@ class EngineerView:
         return sum(len(r.issues) for r in self.repos)
 
 
-def get_engineer_view(session: Session, login: str) -> EngineerView | None:
+def get_engineer_view(
+    session: Session, login: str, allowed_logins: set[str] | None = None
+) -> EngineerView | None:
     """Return ``login``'s open PRs and issues grouped by repository, or ``None`` if none.
 
-    Returns ``None`` when the login has no open work at all (the API turns that into a 404;
-    the web page shows a friendly empty state) — the same convention as
+    "Their" PRs are the ones they *opened* (``author_login``); "their" issues are the ones
+    *assigned* to them (joined through ``IssueAssignee``), consistent with the counts in
+    :func:`list_engineers`. Returns ``None`` when the login has neither (the API turns that
+    into a 404; the web page shows a friendly empty state) — the same convention as
     :func:`get_repository_view`. Repositories are ordered by ``full_name``; within a repo,
     items are ordered most-recently-updated first, matching the Repository view.
+
+    When ``allowed_logins`` is given and ``login`` is not in it, returns ``None`` — so an
+    engineer excluded by the roster is unreachable by URL too, keeping the per-engineer page
+    consistent with the filtered directory list. ``None`` (the default) means no filter.
     """
+    if allowed_logins is not None and login not in allowed_logins:
+        return None
+
     pull_requests = list(
         session.exec(
             select(PullRequest)
@@ -183,7 +214,8 @@ def get_engineer_view(session: Session, login: str) -> EngineerView | None:
     issues = list(
         session.exec(
             select(Issue)
-            .where(col(Issue.author_login) == login)
+            .join(IssueAssignee, col(IssueAssignee.issue_id) == col(Issue.id))
+            .where(col(IssueAssignee.login) == login)
             .order_by(col(Issue.updated_at).desc())
         ).all()
     )
