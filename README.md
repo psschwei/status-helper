@@ -39,13 +39,16 @@ later slice.
 uv sync --extra dev
 cp .env.example .env
 # edit .env: set GITHUB_TOKEN (and GITHUB_BASE_URL for Enterprise)
+cp repos.toml.example repos.toml
 # edit repos.toml: list the repositories to watch (one [[repos]] table each)
 ```
 
-**Config split:** secrets and instance connection details live in `.env` (git-ignored);
-the *set of repositories to watch* lives in `repos.toml` (structural config, safe to
-commit). All repositories currently use the single GitHub instance from `.env` —
-per-repository instance selection is a later, additive change.
+**Config split:** secrets and instance connection details live in `.env`; the *set of
+repositories to watch* lives in `repos.toml`. Both are git-ignored (they're personal to
+your setup) and each ships a committed `*.example` template to copy from. `repos.toml`
+holds no secrets — just structural config. All repositories currently use the single
+GitHub instance from `.env` — per-repository instance selection is a later, additive
+change.
 
 ```toml
 # repos.toml
@@ -94,7 +97,7 @@ uv run pytest            # tests (no network / no token required)
 ## Architecture
 
 ```
-repos.toml          # the repositories to watch (structural config, committed)
+repos.toml          # the repositories to watch (structural config, git-ignored; copy from repos.toml.example)
 src/status_assistant/
   config.py         # pydantic-settings Settings (env / .env) + load_repos()
   repos_config.py   # RepoRef + load_repos(): parse/validate repos.toml (stdlib tomllib)

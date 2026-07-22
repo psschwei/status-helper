@@ -1,6 +1,9 @@
 # Secrets / local config
 .env
 
+# Personal list of repositories to watch (copy from repos.toml.example)
+repos.toml
+
 # Local database (cache of GitHub state — safe to delete and re-sync)
 *.db
 *.db-shm
