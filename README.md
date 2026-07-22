@@ -69,8 +69,11 @@ name  = "api"
 ## Run
 
 ```bash
-uv run uvicorn status_assistant.main:app --reload
+./run.sh            # preflight-checks .env and repos.toml, then starts the dev server
+# (equivalently) uv run uvicorn status_assistant.main:app --reload
 ```
+
+`run.sh` passes any extra arguments through to uvicorn, e.g. `./run.sh --port 9000`.
 
 Then:
 
