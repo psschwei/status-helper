@@ -96,3 +96,126 @@ def get_repository_view(session: Session, owner: str, name: str) -> RepositoryVi
         active_pull_requests=pull_requests,
         active_issues=issues,
     )
+
+
+@dataclass(frozen=True)
+class EngineerListItem:
+    """An engineer (a GitHub login) plus their open-work counts, for the directory list."""
+
+    login: str
+    pull_request_count: int
+    issue_count: int
+
+
+def list_engineers(session: Session) -> list[EngineerListItem]:
+    """Return every engineer with open work, with their open PR and issue counts.
+
+    An "engineer" is not a stored entity — it's derived from ``author_login`` on the open PRs
+    and issues we already cache. Logins are the union across both tables (someone may have
+    only issues, or only PRs), and rows with a missing/blank login are skipped since they
+    can't be attributed to a person. Counts come from two grouped aggregates (one per child
+    table), merged in Python — a fixed number of queries regardless of engineer count.
+    Ordered by login for a stable list.
+    """
+
+    def _counts_by_login(model: type[PullRequest] | type[Issue]) -> dict[str, int]:
+        rows = session.exec(
+            select(model.author_login, func.count())
+            .where(col(model.author_login).is_not(None))
+            .group_by(col(model.author_login))
+        ).all()
+        # Guard against blank logins too; ``is_not(None)`` won't catch an empty string.
+        return {login: count for login, count in rows if login}
+
+    pr_counts = _counts_by_login(PullRequest)
+    issue_counts = _counts_by_login(Issue)
+
+    return [
+        EngineerListItem(
+            login=login,
+            pull_request_count=pr_counts.get(login, 0),
+            issue_count=issue_counts.get(login, 0),
+        )
+        for login in sorted(pr_counts.keys() | issue_counts.keys())
+    ]
+
+
+@dataclass(frozen=True)
+class EngineerRepoWork:
+    """One engineer's open work within a single repository."""
+
+    repository: Repository
+    pull_requests: list[PullRequest]
+    issues: list[Issue]
+
+
+@dataclass(frozen=True)
+class EngineerView:
+    """Everything the Engineer page needs: their open work grouped per repository."""
+
+    login: str
+    repos: list[EngineerRepoWork]
+
+    @property
+    def pull_request_count(self) -> int:
+        return sum(len(r.pull_requests) for r in self.repos)
+
+    @property
+    def issue_count(self) -> int:
+        return sum(len(r.issues) for r in self.repos)
+
+
+def get_engineer_view(session: Session, login: str) -> EngineerView | None:
+    """Return ``login``'s open PRs and issues grouped by repository, or ``None`` if none.
+
+    Returns ``None`` when the login has no open work at all (the API turns that into a 404;
+    the web page shows a friendly empty state) — the same convention as
+    :func:`get_repository_view`. Repositories are ordered by ``full_name``; within a repo,
+    items are ordered most-recently-updated first, matching the Repository view.
+    """
+    pull_requests = list(
+        session.exec(
+            select(PullRequest)
+            .where(col(PullRequest.author_login) == login)
+            .order_by(col(PullRequest.updated_at).desc())
+        ).all()
+    )
+    issues = list(
+        session.exec(
+            select(Issue)
+            .where(col(Issue.author_login) == login)
+            .order_by(col(Issue.updated_at).desc())
+        ).all()
+    )
+
+    if not pull_requests and not issues:
+        return None
+
+    # Fetch the referenced repositories in one query, then group the work in Python.
+    repo_ids = {pr.repository_id for pr in pull_requests} | {i.repository_id for i in issues}
+    repositories = {
+        repo.id: repo
+        for repo in session.exec(
+            select(Repository).where(col(Repository.id).in_(repo_ids))
+        ).all()
+    }
+
+    prs_by_repo: dict[int, list[PullRequest]] = {}
+    for pr in pull_requests:
+        prs_by_repo.setdefault(pr.repository_id, []).append(pr)
+    issues_by_repo: dict[int, list[Issue]] = {}
+    for issue in issues:
+        issues_by_repo.setdefault(issue.repository_id, []).append(issue)
+
+    repos = [
+        EngineerRepoWork(
+            repository=repositories[repo_id],
+            pull_requests=prs_by_repo.get(repo_id, []),
+            issues=issues_by_repo.get(repo_id, []),
+        )
+        for repo_id in repo_ids
+        if repo_id in repositories
+    ]
+    repos.sort(key=lambda r: r.repository.full_name)
+
+    return EngineerView(login=login, repos=repos)

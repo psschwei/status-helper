@@ -11,6 +11,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session
 
 from status_assistant.api.schemas import (
+    EngineerListItemOut,
+    EngineerViewOut,
     RepositoryListItemOut,
     RepositoryViewOut,
     SyncResultOut,
@@ -20,7 +22,12 @@ from status_assistant.connectors.base import GitHubConnector
 from status_assistant.db import get_session
 from status_assistant.dependencies import get_connector
 from status_assistant.ingestion.sync import sync_all, sync_repository
-from status_assistant.queries import get_repository_view, list_repositories
+from status_assistant.queries import (
+    get_engineer_view,
+    get_repository_view,
+    list_engineers,
+    list_repositories,
+)
 
 router = APIRouter(prefix="/api/repositories", tags=["repositories"])
 
@@ -64,3 +71,31 @@ def repository_view(owner: str, name: str, session: SessionDep) -> RepositoryVie
             detail=f"Repository '{owner}/{name}' has not been synced yet.",
         )
     return RepositoryViewOut.from_view(view)
+
+
+# Engineers are a *derived* axis over the same cached PRs/issues (keyed by author login), so
+# these routes need no ingestion of their own — hence a separate router under a different
+# prefix rather than a nested repository path.
+engineers_router = APIRouter(prefix="/api/engineers", tags=["engineers"])
+
+
+@engineers_router.get("", response_model=list[EngineerListItemOut])
+def list_engineers_view(session: SessionDep) -> list[EngineerListItemOut]:
+    """Return every engineer with open work, with their open PR and issue counts."""
+    return [EngineerListItemOut.from_item(item) for item in list_engineers(session)]
+
+
+@engineers_router.get("/{login}", response_model=EngineerViewOut)
+def engineer_view(login: str, session: SessionDep) -> EngineerViewOut:
+    """Return an engineer's open PRs and issues, grouped by repository.
+
+    404 if the login has no open work in the cache — either they have none, or the relevant
+    repositories haven't been synced yet.
+    """
+    view = get_engineer_view(session, login)
+    if view is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No open work found for engineer '{login}'.",
+        )
+    return EngineerViewOut.from_view(view)

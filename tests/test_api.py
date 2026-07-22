@@ -184,3 +184,80 @@ def test_dashboard_shows_synced_and_unsynced_repos(
     assert "octocat/hello-world" in html  # synced repo
     assert "acme/api" in html  # configured but not yet synced
     assert "not synced" in html  # the badge on the unsynced repo
+
+
+# --- Engineers -------------------------------------------------------------------
+
+# In _multi_connector, make_pull_request defaults author to "alice" and make_issue to
+# "carol": alice authors PRs in both repos, carol authors the one issue.
+
+
+def test_list_engineers_endpoint(
+    client: TestClient, use_connector: InstallConnector, use_repos: InstallRepos
+) -> None:
+    use_connector(_multi_connector())
+    use_repos([("octocat", "hello-world"), ("acme", "api")])
+    client.post("/api/repositories/sync")
+
+    resp = client.get("/api/engineers")
+
+    assert resp.status_code == 200
+    counts = {
+        e["login"]: (e["pull_request_count"], e["issue_count"]) for e in resp.json()
+    }
+    # alice: 3 PRs (1 + 2) across both repos; carol: 1 issue.
+    assert counts == {"alice": (3, 0), "carol": (0, 1)}
+
+
+def test_engineer_view_endpoint_groups_per_repo(
+    client: TestClient, use_connector: InstallConnector, use_repos: InstallRepos
+) -> None:
+    use_connector(_multi_connector())
+    use_repos([("octocat", "hello-world"), ("acme", "api")])
+    client.post("/api/repositories/sync")
+
+    resp = client.get("/api/engineers/alice")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["login"] == "alice"
+    assert body["pull_request_count"] == 3
+    per_repo = {r["repository"]["full_name"]: len(r["pull_requests"]) for r in body["repos"]}
+    assert per_repo == {"octocat/hello-world": 1, "acme/api": 2}
+
+
+def test_engineer_view_404_for_unknown_login(
+    client: TestClient, use_connector: InstallConnector, use_repos: InstallRepos
+) -> None:
+    use_connector(_multi_connector())
+    use_repos([("octocat", "hello-world"), ("acme", "api")])
+    client.post("/api/repositories/sync")
+
+    resp = client.get("/api/engineers/nobody")
+
+    assert resp.status_code == 404
+    assert "nobody" in resp.json()["detail"]
+
+
+def test_engineers_html_pages_render(
+    client: TestClient, use_connector: InstallConnector, use_repos: InstallRepos
+) -> None:
+    use_connector(_multi_connector())
+    use_repos([("octocat", "hello-world"), ("acme", "api")])
+    client.post("/api/repositories/sync")
+
+    directory = client.get("/engineers")
+    assert directory.status_code == 200
+    assert "alice" in directory.text
+
+    page = client.get("/engineers/alice")
+    assert page.status_code == 200
+    assert "octocat/hello-world" in page.text
+    assert "acme/api" in page.text
+
+
+def test_engineer_html_page_empty_state(client: TestClient) -> None:
+    """A login with no work is a friendly 200 empty state in the browser, not a 404."""
+    resp = client.get("/engineers/nobody")
+    assert resp.status_code == 200
+    assert "No open work" in resp.text

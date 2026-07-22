@@ -25,8 +25,12 @@ a:hover { text-decoration: underline; }
   background: var(--panel);
   border-bottom: 1px solid var(--border);
   padding: 0.75rem 1.5rem;
+  display: flex;
+  align-items: baseline;
+  gap: 1.5rem;
 }
 .site-title { font-weight: 600; color: var(--text); }
+.site-nav { display: flex; gap: 1rem; font-size: 0.9rem; }
 
 .content {
   max-width: 960px;
@@ -51,6 +55,15 @@ a:hover { text-decoration: underline; }
   align-items: center;
   gap: 0.5rem;
 }
+.panel h3 {
+  font-size: 0.95rem;
+  margin: 1rem 0 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--muted);
+}
+.panel h3:first-of-type { margin-top: 0; }
 .count {
   background: var(--bg);
   border: 1px solid var(--border);

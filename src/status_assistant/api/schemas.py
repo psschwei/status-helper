@@ -9,7 +9,12 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
 
-from status_assistant.queries import RepositoryListItem, RepositoryView
+from status_assistant.queries import (
+    EngineerListItem,
+    EngineerView,
+    RepositoryListItem,
+    RepositoryView,
+)
 
 
 class PullRequestOut(BaseModel):
@@ -78,6 +83,57 @@ class RepositoryViewOut(BaseModel):
                 PullRequestOut.model_validate(pr) for pr in view.active_pull_requests
             ],
             active_issues=[IssueOut.model_validate(i) for i in view.active_issues],
+        )
+
+
+class EngineerListItemOut(BaseModel):
+    """A directory row: an engineer (login) plus their open-work counts."""
+
+    login: str
+    pull_request_count: int
+    issue_count: int
+
+    @classmethod
+    def from_item(cls, item: EngineerListItem) -> "EngineerListItemOut":
+        return cls(
+            login=item.login,
+            pull_request_count=item.pull_request_count,
+            issue_count=item.issue_count,
+        )
+
+
+class EngineerRepoWorkOut(BaseModel):
+    """One engineer's open work within a single repository."""
+
+    repository: RepositoryOut
+    pull_requests: list[PullRequestOut]
+    issues: list[IssueOut]
+
+
+class EngineerViewOut(BaseModel):
+    """The Engineer view payload: open work grouped per repository, plus totals."""
+
+    login: str
+    pull_request_count: int
+    issue_count: int
+    repos: list[EngineerRepoWorkOut]
+
+    @classmethod
+    def from_view(cls, view: EngineerView) -> "EngineerViewOut":
+        return cls(
+            login=view.login,
+            pull_request_count=view.pull_request_count,
+            issue_count=view.issue_count,
+            repos=[
+                EngineerRepoWorkOut(
+                    repository=RepositoryOut.model_validate(work.repository),
+                    pull_requests=[
+                        PullRequestOut.model_validate(pr) for pr in work.pull_requests
+                    ],
+                    issues=[IssueOut.model_validate(i) for i in work.issues],
+                )
+                for work in view.repos
+            ],
         )
 
 

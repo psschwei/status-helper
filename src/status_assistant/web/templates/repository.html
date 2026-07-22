@@ -38,7 +38,7 @@
                 <a href="{{ pr.html_url }}">{{ pr.title }}</a>
                 {% if pr.is_draft %}<span class="badge draft">draft</span>{% endif %}
               </td>
-              <td>{{ pr.author_login or "—" }}</td>
+              <td>{% if pr.author_login %}<a href="/engineers/{{ pr.author_login }}">{{ pr.author_login }}</a>{% else %}—{% endif %}</td>
               <td class="when">{{ pr.updated_at | datetime }}</td>
             </tr>
           {% endfor %}
@@ -61,7 +61,7 @@
             <tr>
               <td class="num">{{ issue.number }}</td>
               <td><a href="{{ issue.html_url }}">{{ issue.title }}</a></td>
-              <td>{{ issue.author_login or "—" }}</td>
+              <td>{% if issue.author_login %}<a href="/engineers/{{ issue.author_login }}">{{ issue.author_login }}</a>{% else %}—{% endif %}</td>
               <td class="when">{{ issue.updated_at | datetime }}</td>
             </tr>
           {% endfor %}

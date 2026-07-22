@@ -17,7 +17,12 @@ from sqlmodel import Session
 
 from status_assistant.config import Settings, get_settings
 from status_assistant.db import get_session
-from status_assistant.queries import get_repository_view, list_repositories
+from status_assistant.queries import (
+    get_engineer_view,
+    get_repository_view,
+    list_engineers,
+    list_repositories,
+)
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
@@ -114,4 +119,29 @@ def repository_page(owner: str, name: str, request: Request, session: SessionDep
         request,
         "repository.html",
         {"view": view, "owner": owner, "name": name},
+    )
+
+
+@router.get("/engineers", response_class=HTMLResponse)
+def engineers_page(request: Request, session: SessionDep) -> HTMLResponse:
+    """Engineer directory: everyone with open work, and their open-work counts."""
+    return templates.TemplateResponse(
+        request,
+        "engineers.html",
+        {"engineers": list_engineers(session)},
+    )
+
+
+@router.get("/engineers/{login}", response_class=HTMLResponse)
+def engineer_page(login: str, request: Request, session: SessionDep) -> HTMLResponse:
+    """Per-engineer page: their open PRs and issues grouped by repository.
+
+    A login with no open work returns 200 with a friendly empty state (same convention as
+    an un-synced repository page) rather than a 404 in the browser.
+    """
+    view = get_engineer_view(session, login)
+    return templates.TemplateResponse(
+        request,
+        "engineer.html",
+        {"view": view, "login": login},
     )

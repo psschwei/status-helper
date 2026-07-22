@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Engineers — Engineering Status Assistant{% endblock %}
+
+{% block content %}
+<section class="repo-header">
+  <h1>Engineers</h1>
+  <p class="synced">Everyone with open work across watched repositories.</p>
+</section>
+
+<section class="panel">
+  <h2>Engineers <span class="count">{{ engineers | length }}</span></h2>
+  {% if engineers %}
+    <table>
+      <thead>
+        <tr><th>Engineer</th><th>Open PRs</th><th>Open issues</th></tr>
+      </thead>
+      <tbody>
+        {% for eng in engineers %}
+          <tr>
+            <td><a href="/engineers/{{ eng.login }}">{{ eng.login }}</a></td>
+            <td class="num">{{ eng.pull_request_count }}</td>
+            <td class="num">{{ eng.issue_count }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="empty-list">
+      No engineers yet. Sync a repository first:
+      <code>curl -X POST localhost:8000/api/repositories/sync</code>
+    </p>
+  {% endif %}
+</section>
+{% endblock %}

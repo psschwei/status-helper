@@ -11,7 +11,7 @@ blocked, and where to focus — without manually gathering status.
 This is built incrementally in vertical slices. See `AI_Engineering_Status_Assistant_Prompt.md`
 for the full product vision.
 
-## Current slice: Multiple Repositories + Home Dashboard
+## Current slice: Engineer View
 
 Everything is still deterministic (no LLM yet). The path, end to end:
 
@@ -20,12 +20,17 @@ Everything is still deterministic (no LLM yet). The path, end to end:
    API (per-repo, or all at once).
 3. Persist them to SQLite (an idempotent cache of GitHub state).
 4. Serve them via a JSON API.
-5. Render a **home dashboard** listing every watched repository with its open-PR/issue
-   counts, and a per-repository **Repository page**.
+5. Render a **home dashboard** (every watched repository with its open-PR/issue counts), a
+   per-repository **Repository page**, an **Engineers directory**, and a per-engineer
+   **Engineer page** showing their open work grouped by repository.
 
-Slice 1 delivered the single-repository Repository View; slice 2 makes repositories
-first-class and adds the dashboard. The AI summary layer (via a LiteLLM proxy) arrives in a
-later slice.
+Slice 1 delivered the single-repository Repository View; slice 2 made repositories
+first-class and added the dashboard; slice 3 adds the Engineer View. Engineers are a
+*derived* axis — computed from the `author_login` already stored on PRs and issues — so this
+slice added no new table, ingestion, or config, only a read-side query plus an API route and
+page. It intentionally shows only **open, authored** work: reviews, "reviews owed", blockers,
+and completed work depend on data not yet ingested, and the AI summary layer (via a LiteLLM
+proxy) all arrive in later slices.
 
 ## Requirements
 
@@ -81,10 +86,18 @@ curl localhost:8000/api/repositories
 
 # Fetch a single repository view as JSON
 curl localhost:8000/api/repositories/<owner>/<name>
+
+# List all engineers with open work and their open-PR/issue counts
+curl localhost:8000/api/engineers
+
+# Fetch one engineer's open work (grouped by repository) as JSON
+curl localhost:8000/api/engineers/<login>
 ```
 
-Open <http://localhost:8000/> for the home dashboard, and
-<http://localhost:8000/repositories/<owner>/<name>> for a repository's page.
+Open <http://localhost:8000/> for the home dashboard,
+<http://localhost:8000/repositories/<owner>/<name>> for a repository's page,
+<http://localhost:8000/engineers> for the engineer directory, and
+<http://localhost:8000/engineers/<login>> for an engineer's page.
 
 ## Develop
 
@@ -109,9 +122,9 @@ src/status_assistant/
     github.py       # githubkit-backed implementation (.com + Enterprise)
   ingestion/
     sync.py         # sync_repository() and sync_all(): fetch -> map -> upsert
-  queries.py        # list_repositories() + get_repository_view() — shared by API and web
-  api/              # JSON endpoints + response DTOs
-  web/              # Jinja2 dashboard + Repository page
+  queries.py        # repository + engineer read queries — shared by API and web
+  api/              # JSON endpoints + response DTOs (repository + engineer routers)
+  web/              # Jinja2 dashboard, Repository page, Engineer directory + page
   main.py           # FastAPI app factory
 ```
 
@@ -122,3 +135,9 @@ entities throughout — the data model, queries, and API are all keyed by reposi
 watched set is declared in `repos.toml` rather than hard-coded. A single global GitHub
 instance is used today; the `Repository.github_base_url` column and the connector factory
 leave multi-instance support as an additive change.
+
+**Engineers** are a *derived* axis, not a stored entity: they're computed from the
+`author_login` on the PRs and issues already cached, so the Engineer View is pure read-side
+(a query, a router, and pages) with no schema, ingestion, or config change. A GitHub login is
+treated as the identity; a first-class identity model is only warranted once identities are
+correlated across sources (Slack/Jira), so it's deferred.

@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}{{ login }} — Status{% endblock %}
+
+{% block content %}
+{% if view is none %}
+  <section class="empty">
+    <h1>{{ login }}</h1>
+    <p>No open work found for this engineer.</p>
+    <p class="hint">
+      They may have no open PRs or issues, or the relevant repositories haven't been synced.
+    </p>
+  </section>
+{% else %}
+  <section class="repo-header">
+    <h1>{{ view.login }}</h1>
+    <p class="synced">
+      {{ view.pull_request_count }} open PR{{ "" if view.pull_request_count == 1 else "s" }},
+      {{ view.issue_count }} open issue{{ "" if view.issue_count == 1 else "s" }}
+      across {{ view.repos | length }} repositor{{ "y" if view.repos | length == 1 else "ies" }}.
+    </p>
+  </section>
+
+  {% for work in view.repos %}
+    <section class="panel">
+      <h2>
+        <a href="/repositories/{{ work.repository.owner }}/{{ work.repository.name }}">{{ work.repository.full_name }}</a>
+      </h2>
+
+      {% if work.pull_requests %}
+        <h3>Pull requests <span class="count">{{ work.pull_requests | length }}</span></h3>
+        <table>
+          <thead>
+            <tr><th>#</th><th>Title</th><th>Updated</th></tr>
+          </thead>
+          <tbody>
+            {% for pr in work.pull_requests %}
+              <tr>
+                <td class="num">{{ pr.number }}</td>
+                <td>
+                  <a href="{{ pr.html_url }}">{{ pr.title }}</a>
+                  {% if pr.is_draft %}<span class="badge draft">draft</span>{% endif %}
+                </td>
+                <td class="when">{{ pr.updated_at | datetime }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+
+      {% if work.issues %}
+        <h3>Issues <span class="count">{{ work.issues | length }}</span></h3>
+        <table>
+          <thead>
+            <tr><th>#</th><th>Title</th><th>Updated</th></tr>
+          </thead>
+          <tbody>
+            {% for issue in work.issues %}
+              <tr>
+                <td class="num">{{ issue.number }}</td>
+                <td><a href="{{ issue.html_url }}">{{ issue.title }}</a></td>
+                <td class="when">{{ issue.updated_at | datetime }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+    </section>
+  {% endfor %}
+{% endif %}
+{% endblock %}
