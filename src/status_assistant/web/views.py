@@ -15,13 +15,16 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlmodel import Session
 
+from status_assistant.ai.base import AISummarizer
+from status_assistant.ai.summarize import generate_engineer_summary
 from status_assistant.config import Settings, get_settings
 from status_assistant.connectors.base import GitHubConnector
 from status_assistant.db import get_session
-from status_assistant.dependencies import get_connector
+from status_assistant.dependencies import get_connector, get_optional_summarizer
 from status_assistant.engineers_config import allowed_logins
 from status_assistant.ingestion.sync import sync_all
 from status_assistant.queries import (
+    get_engineer_summary,
     get_engineer_view,
     get_repository_view,
     list_engineers,
@@ -46,6 +49,7 @@ router = APIRouter(tags=["web"])
 SessionDep = Annotated[Session, Depends(get_session)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 ConnectorDep = Annotated[GitHubConnector, Depends(get_connector)]
+SummarizerDep = Annotated[AISummarizer | None, Depends(get_optional_summarizer)]
 
 
 @dataclass(frozen=True)
@@ -165,12 +169,36 @@ def engineer_page(
 
     A login with no open work — or one excluded by the engineer roster — returns 200 with a
     friendly empty state (same convention as an un-synced repository page) rather than a 404
-    in the browser.
+    in the browser. Also loads any previously-generated AI summary (see the summary panel)
+    without invoking the LLM; generation happens only on the POST below.
     """
     allowed = allowed_logins(settings.load_engineers())
     view = get_engineer_view(session, login, allowed)
     return templates.TemplateResponse(
         request,
         "engineer.html",
-        {"view": view, "login": login},
+        {
+            "view": view,
+            "login": login,
+            "summary": get_engineer_summary(session, login),
+            "llm_configured": settings.llm_configured,
+        },
     )
+
+
+@router.post("/engineers/{login}/summary")
+def generate_engineer_summary_page(
+    login: str, session: SessionDep, settings: SettingsDep, summarizer: SummarizerDep
+) -> RedirectResponse:
+    """Generate (or regenerate) an engineer's AI summary, then redirect back to their page.
+
+    Backs the "Generate summary" / "Regenerate" button. Follows POST-redirect-GET (like the
+    dashboard "Sync all" button): the summary is generated and persisted synchronously, then a
+    303 sends the browser back to the engineer page, which renders the fresh summary. When the
+    LLM isn't configured, or the login has no work, it simply redirects back — the page shows
+    the appropriate state (a "not configured" hint, or the empty state).
+    """
+    if summarizer is not None:
+        allowed = allowed_logins(settings.load_engineers())
+        generate_engineer_summary(session, summarizer, settings.llm_model, login, allowed)
+    return RedirectResponse(url=f"/engineers/{login}", status_code=303)

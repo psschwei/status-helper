@@ -133,6 +133,10 @@ tbody tr:last-child td { border-bottom: none; }
 
 .empty h1 { margin-bottom: 0.5rem; }
 .hint { color: var(--muted); font-size: 0.9rem; }
+
+/* AI summary panel: the generated prose, kept readable, above its provenance/button. */
+.summary-text { margin: 0 0 0.5rem; line-height: 1.5; white-space: pre-wrap; }
+.ai-summary form { margin-top: 0.5rem; }
 code {
   background: #eef1f4;
   padding: 0.1rem 0.35rem;

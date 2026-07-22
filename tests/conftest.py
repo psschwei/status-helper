@@ -22,10 +22,11 @@ from sqlalchemy import Engine  # noqa: E402
 from sqlmodel import Session, SQLModel, create_engine  # noqa: E402
 from sqlmodel.pool import StaticPool  # noqa: E402
 
+from status_assistant.ai.base import SummaryPrompt  # noqa: E402
 from status_assistant.config import get_settings  # noqa: E402
 from status_assistant.connectors.base import IssueWithAssignees  # noqa: E402
 from status_assistant.db import get_session  # noqa: E402
-from status_assistant.dependencies import get_connector  # noqa: E402
+from status_assistant.dependencies import get_connector, get_optional_summarizer  # noqa: E402
 from status_assistant.engineers_config import EngineerRef  # noqa: E402
 from status_assistant.main import app  # noqa: E402
 from status_assistant.models import (  # noqa: E402
@@ -148,6 +149,24 @@ class FakeMultiRepoConnector:
         return self._for(owner, name).list_closing_issue_links(owner, name)
 
 
+class FakeSummarizer:
+    """An ``AISummarizer`` returning canned, inspectable text — no LLM call.
+
+    Records the last prompt it was handed (so a test can assert the facts were passed) and
+    returns a string that echoes a marker plus the user message, so the persisted summary is
+    both deterministic and traceable back to the input.
+    """
+
+    MARKER = "SUMMARY::"
+
+    def __init__(self) -> None:
+        self.last_prompt: SummaryPrompt | None = None
+
+    def summarize(self, prompt: SummaryPrompt) -> str:
+        self.last_prompt = prompt
+        return f"{self.MARKER}{prompt.user}"
+
+
 def make_repository(**overrides: object) -> Repository:
     defaults: dict[str, object] = dict(
         id=1296269,
@@ -232,6 +251,24 @@ def use_connector(
     return _install
 
 
+@pytest.fixture
+def use_summarizer(client: TestClient) -> Callable[[FakeSummarizer], None]:
+    """Return a helper that installs a fake summarizer for the client.
+
+    Overrides ``get_optional_summarizer`` (what the routes depend on) so the LLM is never
+    called. Without this override the dependency returns ``None`` — the "not configured"
+    path — since tests set no ``LLM_API_KEY``.
+    """
+
+    def _install(summarizer: FakeSummarizer) -> None:
+        app.dependency_overrides[get_optional_summarizer] = lambda: summarizer
+        # Keep the settings flag consistent: a summarizer being available means the UI should
+        # offer the generate button. This installs/mutates the same stub as use_repos/use_engineers.
+        _stub_settings().llm_configured = True
+
+    return _install
+
+
 class _StubSettings:
     """A stand-in for ``Settings`` carrying just the config the routes read.
 
@@ -243,6 +280,11 @@ class _StubSettings:
     def __init__(self) -> None:
         self.repos: list[RepoRef] = []
         self.engineers: list[EngineerRef] = []
+        # AI-summary config the engineer routes read. Default: LLM not configured (no key),
+        # so the "not configured" path is exercised unless a test installs a fake summarizer
+        # (which overrides get_optional_summarizer directly, independent of this flag).
+        self.llm_configured: bool = False
+        self.llm_model: str = "test-model"
 
     def load_repos(self) -> list[RepoRef]:
         return list(self.repos)

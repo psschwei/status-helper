@@ -11,9 +11,10 @@ blocked, and where to focus — without manually gathering status.
 This is built incrementally in vertical slices. See `AI_Engineering_Status_Assistant_Prompt.md`
 for the full product vision.
 
-## Current slice: Engineer View
+## Current slice: AI Status Summary (first LLM slice)
 
-Everything is still deterministic (no LLM yet). The path, end to end:
+Slices 1–3 are deterministic. This slice adds the **first LLM integration**: an on-demand,
+persisted AI status summary on the Engineer page. The path, end to end:
 
 1. Configure **N** repositories in `repos.toml`.
 2. Sync each repository's **open pull requests** and **open issues** from the GitHub REST
@@ -23,14 +24,25 @@ Everything is still deterministic (no LLM yet). The path, end to end:
 5. Render a **home dashboard** (every watched repository with its open-PR/issue counts), a
    per-repository **Repository page**, an **Engineers directory**, and a per-engineer
    **Engineer page** showing their open work grouped by repository.
+6. On the Engineer page, a **Generate summary** button asks an LLM to summarize that
+   engineer's open work into a short status update, stored and shown on reload (with a
+   **Regenerate** button).
 
 Slice 1 delivered the single-repository Repository View; slice 2 made repositories
-first-class and added the dashboard; slice 3 adds the Engineer View. Engineers are a
+first-class and added the dashboard; slice 3 added the Engineer View. Engineers are a
 *derived* axis, computed from what's already cached: a PR belongs to whoever **opened** it
 (`author_login`), while an issue belongs to whoever it is **assigned** to (the
-`IssueAssignee` table — an issue can have several assignees, so it counts for each). Reviews,
-"reviews owed", blockers, and completed work depend on data not yet ingested, and the AI
-summary layer (via a LiteLLM proxy) all arrive in later slices.
+`IssueAssignee` table — an issue can have several assignees, so it counts for each).
+
+**Division of labor for the AI slice:** deterministic code gathers and shapes the facts (the
+engineer's PRs/issues, counts, draft flags, dates); the LLM only *summarizes* them into prose —
+it never fetches or computes. The client is accessed through an OpenAI-compatible endpoint (a
+LiteLLM proxy, or a provider API), behind an `AISummarizer` protocol that mirrors the
+`GitHubConnector` seam. Summaries are **derived output**, not cached GitHub state, so a
+repository re-sync does not clear them (a `generated_at` timestamp makes staleness visible).
+
+Reviews, "reviews owed", blockers, and completed work depend on data not yet ingested, and
+Repository/Team summaries arrive in later slices.
 
 ## Requirements
 
@@ -54,6 +66,12 @@ your setup) and each ships a committed `*.example` template to copy from. `repos
 holds no secrets — just structural config. All repositories currently use the single
 GitHub instance from `.env` — per-repository instance selection is a later, additive
 change.
+
+**AI summaries (optional):** set `LLM_BASE_URL`, `LLM_MODEL`, and `LLM_API_KEY` in `.env`
+to enable the Engineer-page AI summary. Point `LLM_BASE_URL` at any OpenAI-compatible
+endpoint — a [LiteLLM proxy](https://docs.litellm.ai/) (recommended; provider-agnostic) or
+a provider's own API. Without `LLM_API_KEY` the feature stays disabled: the page shows a
+"not configured" hint instead of the generate button, and the API returns `503`.
 
 ```toml
 # repos.toml
@@ -109,6 +127,12 @@ curl localhost:8000/api/engineers
 
 # Fetch one engineer's open work (grouped by repository) as JSON
 curl localhost:8000/api/engineers/<login>
+
+# Generate (or regenerate) an engineer's AI status summary (needs LLM_API_KEY; 503 if not)
+curl -X POST localhost:8000/api/engineers/<login>/summary
+
+# Fetch a previously-generated summary (404 if none yet)
+curl localhost:8000/api/engineers/<login>/summary
 ```
 
 Open <http://localhost:8000/> for the home dashboard,
@@ -134,16 +158,20 @@ src/status_assistant/
   repos_config.py   # RepoRef + load_repos(): parse/validate repos.toml (stdlib tomllib)
   engineers_config.py # EngineerRef + load_engineers()/allowed_logins(): optional roster filter
   db.py             # SQLite engine + session
-  models.py         # SQLModel tables: Repository, PullRequest, Issue, IssueAssignee
-  dependencies.py   # get_connector_for(base_url) — connector factory (the instance seam)
+  models.py         # SQLModel tables: Repository, PullRequest, Issue, IssueAssignee, EngineerSummary
+  dependencies.py   # get_connector_for(base_url) + get_summarizer/get_optional_summarizer (the seams)
   connectors/
-    base.py         # GitHubConnector Protocol (the seam)
+    base.py         # GitHubConnector Protocol (the data-source seam)
     github.py       # githubkit-backed implementation (.com + Enterprise)
+  ai/
+    base.py         # AISummarizer Protocol + SummaryPrompt (the AI seam)
+    openai_client.py# OpenAI-SDK-backed implementation (LiteLLM proxy / any OpenAI-compatible API)
+    summarize.py    # build_engineer_summary_prompt() (deterministic) + generate_engineer_summary()
   ingestion/
     sync.py         # sync_repository() and sync_all(): fetch -> map -> upsert
-  queries.py        # repository + engineer read queries — shared by API and web
-  api/              # JSON endpoints + response DTOs (repository + engineer routers)
-  web/              # Jinja2 dashboard, Repository page, Engineer directory + page
+  queries.py        # repository + engineer read queries (incl. get_engineer_summary) — shared by API and web
+  api/              # JSON endpoints + response DTOs (repository + engineer routers, incl. summary)
+  web/              # Jinja2 dashboard, Repository page, Engineer directory + page (with AI summary panel)
   main.py           # FastAPI app factory
 ```
 
@@ -161,3 +189,12 @@ Engineer View is mostly read-side (a query, a router, and pages). The one stored
 the assignee join table, because an issue's assignees are many-valued and can't live on the
 issue row. A GitHub login is treated as the identity; a first-class identity model is only
 warranted once identities are correlated across sources (Slack/Jira), so it's deferred.
+
+The **AI summarizer** follows the same seam pattern as the connector: `AISummarizer` is a
+narrow `Protocol` (prose-in via `SummaryPrompt`, prose-out), and `OpenAISummarizer` is the
+only place that knows about the LLM SDK — swap providers by pointing `LLM_BASE_URL` at a
+different endpoint, not by touching call sites. The prompt is built by a **pure, deterministic**
+function (`build_engineer_summary_prompt`) that's unit-tested with no network, so the "what we
+tell the model" logic is verified in isolation and reused when Repository/Team summaries arrive.
+The one stored addition is `EngineerSummary` (keyed by `login`; regenerate is an upsert), which
+is generated output rather than cached GitHub state — so it survives a re-sync.

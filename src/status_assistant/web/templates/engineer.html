@@ -20,6 +20,26 @@
     </p>
   </section>
 
+  <section class="panel ai-summary">
+    <h2>AI Status Summary</h2>
+    {% if summary %}
+      <p class="summary-text">{{ summary.summary_text }}</p>
+      <p class="hint">
+        Generated {{ summary.generated_at | datetime }} · {{ summary.model }}
+      </p>
+    {% elif llm_configured %}
+      <p class="hint">No summary generated yet.</p>
+    {% endif %}
+
+    {% if llm_configured %}
+      <form method="post" action="/engineers/{{ login }}/summary">
+        <button type="submit" class="btn">{{ "Regenerate" if summary else "Generate summary" }}</button>
+      </form>
+    {% else %}
+      <p class="hint">AI summaries are not configured (set <code>LLM_API_KEY</code>).</p>
+    {% endif %}
+  </section>
+
   {% for work in view.repos %}
     <section class="panel">
       <h2>

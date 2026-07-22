@@ -154,6 +154,17 @@ class EngineerViewOut(BaseModel):
         )
 
 
+class EngineerSummaryOut(BaseModel):
+    """An engineer's AI-generated status summary."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    login: str
+    summary_text: str
+    model: str
+    generated_at: datetime
+
+
 class SyncResultOut(BaseModel):
     """Summary returned by the sync endpoint."""
 

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from sqlmodel import Session, col, func, select
 
 from status_assistant.models import (
+    EngineerSummary,
     Issue,
     IssueAssignee,
     PullRequest,
@@ -343,3 +344,13 @@ def get_engineer_view(
     repos.sort(key=lambda r: r.repository.full_name)
 
     return EngineerView(login=login, repos=repos)
+
+
+def get_engineer_summary(session: Session, login: str) -> EngineerSummary | None:
+    """Return the stored AI summary for ``login``, or ``None`` if none has been generated.
+
+    A primary-key lookup — the engineer page uses it to render a previously-generated summary
+    without re-invoking the LLM. Generation (and the upsert that persists here) lives in the
+    AI service, keeping this module read-only.
+    """
+    return session.get(EngineerSummary, login)

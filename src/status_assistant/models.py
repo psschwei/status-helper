@@ -83,6 +83,26 @@ class PullRequestIssueLink(SQLModel, table=True):
     issue_id: int = Field(foreign_key="issue.id", primary_key=True, index=True)
 
 
+class EngineerSummary(SQLModel, table=True):
+    """An AI-generated status summary for one engineer.
+
+    Unlike the other tables, this is *derived output*, not a cache of GitHub state: it's
+    prose produced by the LLM from an engineer's open work. The engineer's GitHub ``login``
+    is the natural primary key — one current summary per person — so regenerating is an
+    upsert-by-login (``session.merge``), overwriting the previous text (no history is kept).
+
+    Because it isn't GitHub-cache data, a repository re-sync does **not** clear it: sync only
+    replaces PR / issue / assignee / link rows (see ``ingestion/sync.py``). A summary can
+    therefore go stale relative to the data it was built from; ``generated_at`` makes that
+    visible in the UI.
+    """
+
+    login: str = Field(primary_key=True)
+    summary_text: str
+    model: str  # which LLM produced it, for provenance
+    generated_at: datetime
+
+
 class IssueAssignee(SQLModel, table=True):
     """A GitHub login assigned to an issue — the assignment, not the person.
 

@@ -13,6 +13,7 @@ from status_assistant.engineers_config import EngineerRef
 from tests.conftest import (
     FakeGitHubConnector,
     FakeMultiRepoConnector,
+    FakeSummarizer,
     make_issue,
     make_pull_request,
     make_repository,
@@ -21,6 +22,7 @@ from tests.conftest import (
 InstallConnector = Callable[[FakeGitHubConnector | FakeMultiRepoConnector], None]
 InstallRepos = Callable[[list[tuple[str, str]]], None]
 InstallEngineers = Callable[[list[EngineerRef]], None]
+InstallSummarizer = Callable[[FakeSummarizer], None]
 
 REPO_PATH = "/api/repositories/octocat/hello-world"
 WEB_PATH = "/repositories/octocat/hello-world"
@@ -397,3 +399,149 @@ def test_engineers_page_filtered_by_roster(
     page = client.get("/engineers/carol")
     assert page.status_code == 200
     assert "No open work found" in page.text
+
+
+# --- AI summaries ----------------------------------------------------------------
+
+
+def test_generate_summary_endpoint_persists_and_reads_back(
+    client: TestClient,
+    use_connector: InstallConnector,
+    use_repos: InstallRepos,
+    use_summarizer: InstallSummarizer,
+) -> None:
+    use_connector(_multi_connector())
+    use_repos([("octocat", "hello-world"), ("acme", "api")])
+    use_summarizer(FakeSummarizer())
+    client.post("/api/repositories/sync")
+
+    # Generate: returns the canned summary and records provenance.
+    resp = client.post("/api/engineers/alice/summary")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["login"] == "alice"
+    assert body["summary_text"].startswith(FakeSummarizer.MARKER)
+    assert "octocat/hello-world" in body["summary_text"]  # facts flowed into the prompt
+    assert body["generated_at"] is not None
+
+    # And it's readable back via GET without regenerating.
+    got = client.get("/api/engineers/alice/summary")
+    assert got.status_code == 200
+    assert got.json()["summary_text"] == body["summary_text"]
+
+
+def test_get_summary_404_before_generation(
+    client: TestClient, use_connector: InstallConnector, use_repos: InstallRepos
+) -> None:
+    use_connector(_multi_connector())
+    use_repos([("octocat", "hello-world")])
+    client.post("/api/repositories/sync")
+
+    resp = client.get("/api/engineers/alice/summary")
+    assert resp.status_code == 404
+    assert "No summary" in resp.json()["detail"]
+
+
+def test_generate_summary_regenerates_overwriting(
+    client: TestClient,
+    use_connector: InstallConnector,
+    use_repos: InstallRepos,
+    use_summarizer: InstallSummarizer,
+) -> None:
+    use_connector(_multi_connector())
+    use_repos([("octocat", "hello-world"), ("acme", "api")])
+    use_summarizer(FakeSummarizer())
+    client.post("/api/repositories/sync")
+
+    first = client.post("/api/engineers/alice/summary").json()
+    second = client.post("/api/engineers/alice/summary").json()
+
+    # Still exactly one summary for alice (upsert-by-login), and GET returns the latest.
+    assert first["login"] == second["login"] == "alice"
+    got = client.get("/api/engineers/alice/summary").json()
+    assert got["summary_text"] == second["summary_text"]
+
+
+def test_generate_summary_404_for_unknown_login(
+    client: TestClient,
+    use_connector: InstallConnector,
+    use_repos: InstallRepos,
+    use_summarizer: InstallSummarizer,
+) -> None:
+    use_connector(_multi_connector())
+    use_repos([("octocat", "hello-world")])
+    use_summarizer(FakeSummarizer())
+    client.post("/api/repositories/sync")
+
+    resp = client.post("/api/engineers/nobody/summary")
+    assert resp.status_code == 404
+
+
+def test_generate_summary_503_when_llm_not_configured(
+    client: TestClient, use_connector: InstallConnector, use_repos: InstallRepos
+) -> None:
+    """With no summarizer override installed and no LLM_API_KEY, generation is unavailable."""
+    use_connector(_multi_connector())
+    use_repos([("octocat", "hello-world")])
+    client.post("/api/repositories/sync")
+
+    resp = client.post("/api/engineers/alice/summary")
+    assert resp.status_code == 503
+    assert "not configured" in resp.json()["detail"]
+
+
+def test_generate_summary_respects_roster(
+    client: TestClient,
+    use_connector: InstallConnector,
+    use_repos: InstallRepos,
+    use_engineers: InstallEngineers,
+    use_summarizer: InstallSummarizer,
+) -> None:
+    use_connector(_multi_connector())
+    use_repos([("octocat", "hello-world"), ("acme", "api")])
+    use_engineers([EngineerRef(handles=["alice"])])
+    use_summarizer(FakeSummarizer())
+    client.post("/api/repositories/sync")
+
+    # carol has work but is excluded by the roster -> no summary (404), same as the view.
+    assert client.post("/api/engineers/alice/summary").status_code == 200
+    assert client.post("/api/engineers/carol/summary").status_code == 404
+
+
+def test_engineer_page_summary_panel(
+    client: TestClient,
+    use_connector: InstallConnector,
+    use_repos: InstallRepos,
+    use_summarizer: InstallSummarizer,
+) -> None:
+    use_connector(_multi_connector())
+    use_repos([("octocat", "hello-world"), ("acme", "api")])
+    use_summarizer(FakeSummarizer())
+    client.post("/api/repositories/sync")
+
+    # Before generation (LLM configured via the fake override): a Generate button, no text yet.
+    page = client.get("/engineers/alice")
+    assert "AI Status Summary" in page.text
+    assert "Generate summary" in page.text
+
+    # Generate via the web button (POST-redirect-GET), then the page shows the summary + Regenerate.
+    resp = client.post("/engineers/alice/summary", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/engineers/alice"
+
+    page = client.get("/engineers/alice")
+    assert FakeSummarizer.MARKER in page.text
+    assert "Regenerate" in page.text
+
+
+def test_engineer_page_summary_not_configured(
+    client: TestClient, use_connector: InstallConnector, use_repos: InstallRepos
+) -> None:
+    """No summarizer override + no LLM_API_KEY -> the page shows a hint, not the button."""
+    use_connector(_multi_connector())
+    use_repos([("octocat", "hello-world")])
+    client.post("/api/repositories/sync")
+
+    page = client.get("/engineers/alice")
+    assert "not configured" in page.text
+    assert "Generate summary" not in page.text

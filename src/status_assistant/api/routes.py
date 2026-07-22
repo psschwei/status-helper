@@ -10,8 +10,11 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session
 
+from status_assistant.ai.base import AISummarizer
+from status_assistant.ai.summarize import generate_engineer_summary
 from status_assistant.api.schemas import (
     EngineerListItemOut,
+    EngineerSummaryOut,
     EngineerViewOut,
     RepositoryListItemOut,
     RepositoryViewOut,
@@ -20,10 +23,11 @@ from status_assistant.api.schemas import (
 from status_assistant.config import Settings, get_settings
 from status_assistant.connectors.base import GitHubConnector
 from status_assistant.db import get_session
-from status_assistant.dependencies import get_connector
+from status_assistant.dependencies import get_connector, get_optional_summarizer
 from status_assistant.engineers_config import allowed_logins
 from status_assistant.ingestion.sync import sync_all, sync_repository
 from status_assistant.queries import (
+    get_engineer_summary,
     get_engineer_view,
     get_repository_view,
     list_engineers,
@@ -105,3 +109,47 @@ def engineer_view(login: str, session: SessionDep, settings: SettingsDep) -> Eng
             detail=f"No open work found for engineer '{login}'.",
         )
     return EngineerViewOut.from_view(view)
+
+
+SummarizerDep = Annotated[AISummarizer | None, Depends(get_optional_summarizer)]
+
+
+@engineers_router.get("/{login}/summary", response_model=EngineerSummaryOut)
+def engineer_summary(login: str, session: SessionDep) -> EngineerSummaryOut:
+    """Return the stored AI summary for an engineer.
+
+    404 if none has been generated yet — POST to this same path to create one.
+    """
+    summary = get_engineer_summary(session, login)
+    if summary is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No summary generated yet for engineer '{login}'.",
+        )
+    return EngineerSummaryOut.model_validate(summary)
+
+
+@engineers_router.post("/{login}/summary", response_model=EngineerSummaryOut)
+def generate_summary(
+    login: str, session: SessionDep, settings: SettingsDep, summarizer: SummarizerDep
+) -> EngineerSummaryOut:
+    """Generate (or regenerate) and persist an engineer's AI status summary.
+
+    503 if the LLM isn't configured; 404 if the login has no open work or is excluded by the
+    roster (same condition as the engineer view).
+    """
+    if summarizer is None:
+        raise HTTPException(
+            status_code=503,
+            detail="AI summaries are not configured (set LLM_API_KEY).",
+        )
+    allowed = allowed_logins(settings.load_engineers())
+    summary = generate_engineer_summary(
+        session, summarizer, settings.llm_model, login, allowed
+    )
+    if summary is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No open work found for engineer '{login}'.",
+        )
+    return EngineerSummaryOut.model_validate(summary)

@@ -2,8 +2,9 @@
 
 Split by nature: *secrets and instance connection details* live here (env / ``.env``),
 while the *set of repositories to watch* lives in a separate ``repos.toml`` (see
-``repos_config``) — structural config that is safe to commit. LLM settings are
-intentionally absent; they arrive with the AI-summary slice.
+``repos_config``) — structural config that is safe to commit. The LLM connection (a
+LiteLLM proxy or any OpenAI-compatible endpoint) is configured here too, since its
+base URL and key are instance/secret details of the same kind as the GitHub ones.
 """
 
 from functools import lru_cache
@@ -47,9 +48,22 @@ class Settings(BaseSettings):
     # Kept out of .env because it is structural config, not a secret.
     engineers_config_path: str = "./engineers.toml"
 
+    # --- LLM (AI summaries) ---
+    # An OpenAI-compatible endpoint — a LiteLLM proxy in front of any provider, or a
+    # provider's own API. Summaries are optional: without ``llm_api_key`` the feature is
+    # disabled and the UI shows a "not configured" hint instead of the generate button.
+    llm_base_url: str = "http://localhost:4000"
+    llm_api_key: SecretStr | None = None
+    llm_model: str = "gpt-4o-mini"
+
     # --- Persistence ---
     # SQLite file holding a cache of GitHub state; safe to delete and re-sync.
     database_url: str = "sqlite:///./status.db"
+
+    @property
+    def llm_configured(self) -> bool:
+        """Whether AI summaries can be generated (an API key is present)."""
+        return self.llm_api_key is not None
 
     def load_repos(self) -> list[RepoRef]:
         """Return the configured repositories to watch, read from ``repos_config_path``."""
