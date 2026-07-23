@@ -17,6 +17,7 @@ from status_assistant.ingestion.sync import (
 from status_assistant.models import (
     ActivityEvent,
     ActivityKind,
+    ClosingIssueLink,
     Issue,
     IssueAssignee,
     PRReviewRequest,
@@ -234,6 +235,45 @@ def test_resync_replaces_pr_issue_links(session: Session) -> None:
 
     rows = session.exec(select(PullRequestIssueLink)).all()
     assert {(r.pull_request_id, r.issue_id) for r in rows} == {(101, 202)}
+
+
+def test_sync_persists_closing_issue_number_links(session: Session) -> None:
+    """Number-keyed closing links are persisted for every pair, un-gated by the open set."""
+    connector = FakeGitHubConnector(
+        repository=make_repository(),
+        pull_requests=[make_pull_request(101, 1, "Fix")],
+        issues=[make_issue(201, 3, "A bug")],
+        # The issue (number 7) need NOT be in the open set — the durable link is stored anyway,
+        # since it must outlive the issue's closing.
+        number_links=[(1, 7)],
+    )
+
+    sync_repository(session, connector, "octocat", "hello-world")
+
+    rows = session.exec(select(ClosingIssueLink)).all()
+    assert {(r.repository_id, r.pr_number, r.issue_number) for r in rows} == {(1296269, 1, 7)}
+
+
+def test_resync_keeps_closing_issue_number_links_append_only(session: Session) -> None:
+    """Unlike PullRequestIssueLink, closing number-links are never deleted on re-sync."""
+    repo = make_repository()
+    sync_repository(
+        session,
+        FakeGitHubConnector(repository=repo, number_links=[(1, 7)]),
+        "octocat",
+        "hello-world",
+    )
+    # A later sync no longer reports the link (the PR merged and left the open set), but the
+    # durable row must remain — and re-observing it must not duplicate it.
+    sync_repository(
+        session,
+        FakeGitHubConnector(repository=repo, number_links=[(1, 7), (2, 8)]),
+        "octocat",
+        "hello-world",
+    )
+
+    rows = session.exec(select(ClosingIssueLink)).all()
+    assert {(r.pr_number, r.issue_number) for r in rows} == {(1, 7), (2, 8)}
 
 
 def test_resync_updates_last_synced_at(session: Session) -> None:
@@ -457,6 +497,30 @@ def test_prune_activity_events_spans_all_repos(session: Session) -> None:
     # A single global sweep clears old events across every repository.
     assert prune_activity_events(session, now=now) == 2
     assert session.exec(select(ActivityEvent)).all() == []
+
+
+def test_prune_sweeps_stale_closing_issue_links(session: Session) -> None:
+    """The retention sweep also drops ClosingIssueLink rows older than the cutoff."""
+    now = datetime(2026, 7, 23, 12, 0, tzinfo=UTC)
+    session.add(make_repository())
+    session.add(
+        ClosingIssueLink(
+            repository_id=1296269, pr_number=1, issue_number=7,
+            observed_at=now - timedelta(days=27),  # inside the window → kept
+        )
+    )
+    session.add(
+        ClosingIssueLink(
+            repository_id=1296269, pr_number=2, issue_number=8,
+            observed_at=now - timedelta(days=29),  # outside the window → swept
+        )
+    )
+    session.commit()
+
+    prune_activity_events(session, now=now)
+
+    surviving = {r.pr_number for r in session.exec(select(ClosingIssueLink)).all()}
+    assert surviving == {1}
 
 
 def test_sync_all_prunes_old_activity(session: Session) -> None:

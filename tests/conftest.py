@@ -36,6 +36,7 @@ from status_assistant.main import app  # noqa: E402
 from status_assistant.models import (  # noqa: E402
     ActivityEvent,
     ActivityKind,
+    ClosingIssueLink,
     Issue,
     IssueAssignee,
     PRReviewRequest,
@@ -94,6 +95,7 @@ class FakeGitHubConnector:
         assignees: dict[int, list[str]] | None = None,
         reviewers: dict[int, list[str]] | None = None,
         links: list[tuple[int, int]] | None = None,
+        number_links: list[tuple[int, int]] | None = None,
         activity: list[ActivityRecord] | None = None,
     ) -> None:
         self._repository = repository
@@ -109,6 +111,9 @@ class FakeGitHubConnector:
         # Canned (pull_request_id, issue_id) closing links, mirroring the real connector's
         # ``list_closing_issue_links``. Unfiltered — ingestion drops links to un-cached issues.
         self._links = links or []
+        # Canned (pr_number, issue_number) closing links for ``list_closing_issue_number_links``
+        # — the durable, number-keyed variant the scrum-view dedup reads.
+        self._number_links = number_links or []
         # Canned activity records for ``list_activity_since``. ``ActivityRecord`` is a frozen
         # plain dataclass (not a SQLModel table), so unlike the models above it can be returned
         # as-is without a model_dump round-trip.
@@ -146,6 +151,11 @@ class FakeGitHubConnector:
     def list_closing_issue_links(self, owner: str, name: str) -> list[tuple[int, int]]:
         return list(self._links)
 
+    def list_closing_issue_number_links(
+        self, owner: str, name: str
+    ) -> list[tuple[int, int]]:
+        return list(self._number_links)
+
     def list_activity_since(
         self, owner: str, name: str, *, since: datetime
     ) -> list[ActivityRecord]:
@@ -182,6 +192,11 @@ class FakeMultiRepoConnector:
 
     def list_closing_issue_links(self, owner: str, name: str) -> list[tuple[int, int]]:
         return self._for(owner, name).list_closing_issue_links(owner, name)
+
+    def list_closing_issue_number_links(
+        self, owner: str, name: str
+    ) -> list[tuple[int, int]]:
+        return self._for(owner, name).list_closing_issue_number_links(owner, name)
 
     def list_activity_since(
         self, owner: str, name: str, *, since: datetime
@@ -259,6 +274,19 @@ def make_issue_assignee(issue_id: int, login: str) -> IssueAssignee:
 
 def make_link(pull_request_id: int, issue_id: int) -> PullRequestIssueLink:
     return PullRequestIssueLink(pull_request_id=pull_request_id, issue_id=issue_id)
+
+
+def make_closing_issue_link(
+    pr_number: int, issue_number: int, *, repository_id: int = 1296269, **overrides: object
+) -> ClosingIssueLink:
+    defaults: dict[str, object] = dict(
+        repository_id=repository_id,
+        pr_number=pr_number,
+        issue_number=issue_number,
+        observed_at=FIXED_TIME,
+    )
+    defaults.update(overrides)
+    return ClosingIssueLink(**defaults)
 
 
 def make_review_request(pull_request_id: int, login: str) -> PRReviewRequest:

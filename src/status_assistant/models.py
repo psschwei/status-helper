@@ -84,6 +84,30 @@ class PullRequestIssueLink(SQLModel, table=True):
     issue_id: int = Field(foreign_key="issue.id", primary_key=True, index=True)
 
 
+class ClosingIssueLink(SQLModel, table=True):
+    """A durable, number-keyed record that a PR closes an issue — the scrum view's dedup source.
+
+    Distinct from :class:`PullRequestIssueLink`, which is keyed by GitHub *database ids*, joins
+    the open PR/Issue snapshot rows, and is wholesale-replaced every sync (so it vanishes once
+    either endpoint closes). The scrum view can't use that: by the time a scrum recap runs the
+    PR has merged and the issue closed, both snapshot rows are gone, and the id→number mapping
+    they held is gone with them — while the :class:`ActivityEvent` log the view reads is keyed by
+    *number* (``subject_number``), not id.
+
+    So this table stores the link as ``(repository_id, pr_number, issue_number)``, joining
+    directly to the activity log's ``(repository_id, subject_number)``. Like ``ActivityEvent``,
+    it is **append-only**: sync never deletes it (the link is captured while the PR is still
+    open, and must outlive the merge). It's bounded by the same retention sweep that prunes old
+    events — ``observed_at`` (when the link was last seen) gives that sweep a cutoff column, and
+    also lets a re-sync refresh the row via an idempotent upsert on the composite key.
+    """
+
+    repository_id: int = Field(foreign_key="repository.id", primary_key=True, index=True)
+    pr_number: int = Field(primary_key=True)
+    issue_number: int = Field(primary_key=True)
+    observed_at: datetime = Field(index=True)  # when last seen (UTC); retention prunes on it
+
+
 class EngineerSummary(SQLModel, table=True):
     """An AI-generated status summary for one engineer.
 

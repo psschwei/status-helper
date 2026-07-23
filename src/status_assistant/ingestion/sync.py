@@ -27,6 +27,7 @@ from status_assistant.connectors.base import GitHubConnector
 from status_assistant.models import (
     ActivityEvent,
     ActivityKind,
+    ClosingIssueLink,
     Issue,
     IssueAssignee,
     PRReviewRequest,
@@ -74,6 +75,7 @@ def sync_repository(
     pull_requests = connector.list_pull_requests(owner, name, state="open")
     issues = connector.list_issues(owner, name, state="open")
     links = connector.list_closing_issue_links(owner, name)
+    number_links = connector.list_closing_issue_number_links(owner, name)
     activity = connector.list_activity_since(owner, name, since=now - _ACTIVITY_LOOKBACK)
 
     repository.last_synced_at = now
@@ -170,6 +172,22 @@ def sync_repository(
             )
         )
 
+    # Persist closing PR→issue links durably, keyed by *number* — the scrum view's dedup source.
+    # Unlike the ``PullRequestIssueLink`` block above, this is append-only (no delete) and is
+    # NOT gated on "both endpoints cached open": the link is captured while the PR is still open
+    # (the GraphQL query only walks open PRs) and must survive after the PR merges and the issue
+    # closes, when neither snapshot row — nor the id→number mapping they held — still exists.
+    # ``merge`` upserts on the composite key, refreshing ``observed_at`` on re-observation.
+    for pr_number, issue_number in set(number_links):
+        session.merge(
+            ClosingIssueLink(
+                repository_id=repository.id,
+                pr_number=pr_number,
+                issue_number=issue_number,
+                observed_at=now,
+            )
+        )
+
     session.commit()
 
     return SyncResult(
@@ -192,10 +210,18 @@ def prune_activity_events(
     forever. It runs globally (across all repositories) in a single delete, and commits its own
     transaction so it's independent of any per-repository sync commit. ``now`` is injectable for
     deterministic tests.
+
+    The append-only ``ClosingIssueLink`` table (the scrum-view dedup source) is swept on the
+    same cutoff against its ``observed_at`` — the links only matter while the events they dedupe
+    are still in the window, so they age out together. The returned count is the events removed;
+    link removals aren't counted (the caller reports events).
     """
     cutoff = (now or datetime.now(UTC)) - retention
     result = session.exec(
         delete(ActivityEvent).where(col(ActivityEvent.occurred_at) < cutoff)
+    )
+    session.exec(
+        delete(ClosingIssueLink).where(col(ClosingIssueLink.observed_at) < cutoff)
     )
     session.commit()
     # SQLAlchemy's CursorResult exposes the affected row count on ``rowcount``.

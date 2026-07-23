@@ -58,8 +58,9 @@ class _FakeGitHub:
         self.rest = _FakeRest()
 
     def graphql(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
-        # One page of PRs: #101 closes issues 201 and 202; #102 closes nothing. A null
-        # databaseId (a reference to something outside our reach) must be skipped.
+        # One page of PRs: #101 (number 1) closes issues 201/202 (numbers 11/12); #102 closes
+        # nothing. A null databaseId (a reference outside our reach) must be skipped — and, for
+        # the number-keyed variant, a null ``number`` likewise.
         return {
             "repository": {
                 "pullRequests": {
@@ -67,16 +68,18 @@ class _FakeGitHub:
                     "nodes": [
                         {
                             "databaseId": 101,
+                            "number": 1,
                             "closingIssuesReferences": {
                                 "nodes": [
-                                    {"databaseId": 201},
-                                    {"databaseId": 202},
-                                    {"databaseId": None},
+                                    {"databaseId": 201, "number": 11},
+                                    {"databaseId": 202, "number": 12},
+                                    {"databaseId": None, "number": None},
                                 ]
                             },
                         },
                         {
                             "databaseId": 102,
+                            "number": 2,
                             "closingIssuesReferences": {"nodes": []},
                         },
                     ],
@@ -175,6 +178,14 @@ def test_list_closing_issue_links_maps_pairs_and_drops_null(
     """closingIssuesReferences → (pr_id, issue_id) pairs, skipping null databaseIds."""
     links = connector.list_closing_issue_links("octocat", "hello-world")
     assert links == [(101, 201), (101, 202)]
+
+
+def test_list_closing_issue_number_links_maps_pairs_and_drops_null(
+    connector: GitHubKitConnector,
+) -> None:
+    """closingIssuesReferences → (pr_number, issue_number) pairs, skipping null numbers."""
+    links = connector.list_closing_issue_number_links("octocat", "hello-world")
+    assert links == [(1, 11), (1, 12)]
 
 
 # --- Activity feed mapping --------------------------------------------------------

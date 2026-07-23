@@ -197,8 +197,9 @@ class GitHubKitConnector:
           pageInfo { hasNextPage endCursor }
           nodes {
             databaseId
+            number
             closingIssuesReferences(first: 50) {
-              nodes { databaseId }
+              nodes { databaseId number }
             }
           }
         }
@@ -223,6 +224,38 @@ class GitHubKitConnector:
                     issue_id = issue.get("databaseId")
                     if issue_id is not None:
                         links.append((pr_id, issue_id))
+            page = connection["pageInfo"]
+            if not page["hasNextPage"]:
+                break
+            pr_cursor = page["endCursor"]
+        return links
+
+    def list_closing_issue_number_links(
+        self, owner: str, name: str
+    ) -> list[tuple[int, int]]:
+        """Same closing links as :meth:`list_closing_issue_links`, keyed by *number* not id.
+
+        Returns ``(pr_number, issue_number)`` pairs. The scrum view's dedup joins these against
+        the activity log's ``subject_number``, which the database-id form can't reach once the
+        PR/issue snapshot rows (the only id→number mapping) are gone. Reuses the same paginated
+        query; a node missing its ``number`` is skipped.
+        """
+        links: list[tuple[int, int]] = []
+        pr_cursor: str | None = None
+        while True:
+            data = self._github.graphql(
+                self._CLOSING_LINKS_QUERY,
+                {"owner": owner, "name": name, "prCursor": pr_cursor},
+            )
+            connection = data["repository"]["pullRequests"]
+            for pr in connection["nodes"]:
+                pr_number = pr.get("number")
+                if pr_number is None:
+                    continue
+                for issue in pr["closingIssuesReferences"]["nodes"]:
+                    issue_number = issue.get("number")
+                    if issue_number is not None:
+                        links.append((pr_number, issue_number))
             page = connection["pageInfo"]
             if not page["hasNextPage"]:
                 break

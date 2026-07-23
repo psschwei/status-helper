@@ -14,6 +14,7 @@ from sqlmodel import Session, col, func, select
 from status_assistant.models import (
     ActivityEvent,
     ActivityKind,
+    ClosingIssueLink,
     EngineerSummary,
     Issue,
     IssueAssignee,
@@ -700,6 +701,10 @@ def get_whats_happened(
 
     Self-reviews are excluded: a ``REVIEW_SUBMITTED`` event whose actor is the PR's own author
     (bob reviewing bob's PR) is dropped, since it isn't review work worth reporting.
+
+    Merged-PR/closed-issue pairs are collapsed to one row: when a merged PR closed a linked
+    issue (per a durable :class:`ClosingIssueLink`) and that issue's ``ISSUE_CLOSED`` is in the
+    same window, the ``PR_MERGED`` row is dropped and the issue row kept.
     """
     statement = (
         select(ActivityEvent)
@@ -739,6 +744,38 @@ def get_whats_happened(
         author = pr_authors.get((event.repository_id, event.subject_number))
         return author is not None and author == event.actor_login
 
+    # A merged PR that closed a linked issue would otherwise show twice: once as "merged PR #42"
+    # and once as "closed issue #7". We keep the issue row and drop the PR_MERGED row. Build the
+    # set of ``(repository_id, pr_number)`` to suppress: a PR is suppressed only when it has a
+    # durable ``ClosingIssueLink`` to an issue whose ``ISSUE_CLOSED`` event is *in this window*
+    # (an issue closed outside the window leaves the merged PR as the only in-window signal, so
+    # the PR must stay). The link is number-keyed precisely so it joins the event log after both
+    # the PR and issue have left the open snapshot. Note the PR author and issue closer can
+    # differ — suppressing the PR row removes it from the *PR author's* section while the *issue
+    # closer* still shows the issue-closed row, which is the intended single entry.
+    closed_issues_in_window = {
+        (e.repository_id, e.subject_number)
+        for e in events
+        if e.kind == ActivityKind.ISSUE_CLOSED
+    }
+    suppressed_prs: set[tuple[int, int]] = set()
+    if closed_issues_in_window:
+        repo_ids_with_close = {rid for rid, _ in closed_issues_in_window}
+        for link in session.exec(
+            select(ClosingIssueLink).where(
+                col(ClosingIssueLink.repository_id).in_(repo_ids_with_close)
+            )
+        ).all():
+            if (link.repository_id, link.issue_number) in closed_issues_in_window:
+                suppressed_prs.add((link.repository_id, link.pr_number))
+
+    def _is_deduped_merge(event: ActivityEvent) -> bool:
+        """A PR_MERGED whose closed issue is also in-window — drop it, keep the issue row."""
+        return (
+            event.kind == ActivityKind.PR_MERGED
+            and (event.repository_id, event.subject_number) in suppressed_prs
+        )
+
     repo_ids = {event.repository_id for event in events}
     repositories = {
         repo.id: repo
@@ -755,6 +792,8 @@ def get_whats_happened(
             continue  # defensive: skip an event whose repo somehow isn't cached
         if _is_self_review(event):
             continue  # bob reviewing bob's own PR isn't review activity worth reporting
+        if _is_deduped_merge(event):
+            continue  # the linked issue's ISSUE_CLOSED row already represents this work
         item = ActivityEventItem(event=event, repository=repositories[event.repository_id])
         by_login.setdefault(event.actor_login, []).append(item)
 
