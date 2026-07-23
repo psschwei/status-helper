@@ -1,0 +1,20 @@
+# Persistent storage for the SQLite database. It's only a cache of GitHub state (safe to
+# delete and re-sync), but it must survive pod restarts/rescheduling, so it lives on a PVC.
+#
+# ReadWriteOnce because SQLite is a single-writer store — this is also why the Deployment
+# runs a single replica with the Recreate strategy (see deployment.yaml).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: status-assistant-data
+  namespace: status-assistant
+  labels:
+    app.kubernetes.io/name: status-assistant
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  # Uncomment and set to your cluster's storage class if the default isn't suitable.
+  # storageClassName: standard

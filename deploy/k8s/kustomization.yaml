@@ -1,0 +1,20 @@
+# Apply the whole stack with `kubectl apply -k deploy/k8s`.
+#
+# Note: secret.example.yaml is intentionally NOT listed here — create the real Secret
+# separately (see README) so credentials never flow through a committed manifest.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+
+# Override the image tag without editing deployment.yaml:
+#   kustomize edit set image ghcr.io/your-org/status-assistant=ghcr.io/your-org/status-assistant:v0.1.0
+images:
+  - name: ghcr.io/your-org/status-assistant
+    newTag: latest

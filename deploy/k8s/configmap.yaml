@@ -1,0 +1,45 @@
+# Non-secret configuration, split in two:
+#   1. env vars for instance/connection settings (mirrors .env, minus secrets)
+#   2. the structural TOML files, mounted as files into the container
+#
+# Edit the TOML here to change which repos/engineers are watched, then re-apply and
+# restart the deployment (`kubectl -n status-assistant rollout restart deploy/status-assistant`).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: status-assistant-config
+  namespace: status-assistant
+  labels:
+    app.kubernetes.io/name: status-assistant
+data:
+  # --- Environment (non-secret Settings fields) ---
+  GITHUB_BASE_URL: "https://api.github.com"
+  GITHUB_SSL_VERIFY: "true"
+  LLM_BASE_URL: "http://localhost:4000"
+  LLM_MODEL: "gpt-4o-mini"
+  # SQLite file on the mounted PVC (four slashes = absolute path /data/status.db).
+  DATABASE_URL: "sqlite:////data/status.db"
+  # Point the app at the TOML files mounted from this same ConfigMap (see the volume
+  # mounts in deployment.yaml).
+  REPOS_CONFIG_PATH: "/config/repos.toml"
+  ENGINEERS_CONFIG_PATH: "/config/engineers.toml"
+  SCRUM_CONFIG_PATH: "/config/scrum.toml"
+
+  # --- Structural config files (mounted at /config) ---
+  repos.toml: |
+    [[repos]]
+    owner = "octocat"
+    name  = "hello-world"
+
+  engineers.toml: |
+    # Optional roster. An empty file means "show everyone with open work".
+    # [[engineers]]
+    # name    = "Octo Cat"
+    # handles = ["octocat"]
+
+  scrum.toml: |
+    # Optional. An empty file = built-in default (Mon/Wed/Fri 11:00 America/New_York).
+    # [scrum]
+    # days     = ["mon", "wed", "fri"]
+    # time     = "11:00"
+    # timezone = "America/New_York"

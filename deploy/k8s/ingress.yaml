@@ -1,0 +1,31 @@
+# External access. Assumes an ingress controller is installed (e.g. ingress-nginx).
+# Replace the host with your own, and configure TLS if you want HTTPS (see the commented
+# block). If you don't use an Ingress, delete this file and reach the Service via
+# `kubectl -n status-assistant port-forward svc/status-assistant 8080:80`.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: status-assistant
+  namespace: status-assistant
+  labels:
+    app.kubernetes.io/name: status-assistant
+  # annotations:
+  #   Adjust to your controller. Example for ingress-nginx:
+  #   nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: status.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: status-assistant
+                port:
+                  name: http
+  # tls:
+  #   - hosts:
+  #       - status.example.com
+  #     secretName: status-assistant-tls

@@ -15,6 +15,9 @@ scrum.toml
 *.db-shm
 *.db-wal
 
+# Real Kubernetes Secret (only the *.example.yaml template is committed)
+deploy/k8s/secret.yaml
+
 # Python
 __pycache__/
 *.py[cod]
