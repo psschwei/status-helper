@@ -21,23 +21,24 @@
         {% else %}
           Unknown
         {% endif %}
-        <span class="count">{{ eng.event_count }}</span>
+        <span class="count">{{ eng.action_count }}</span>
       </h2>
       <table>
         <thead>
-          <tr><th>When</th><th>What</th><th>Where</th></tr>
+          <tr><th>Date</th><th>What</th><th>Where</th></tr>
         </thead>
         <tbody>
-          {% for item in eng.events %}
+          {% for act in eng.activities %}
             <tr>
-              <td>{{ item.event.occurred_at | datetime }}</td>
+              <td>{{ act.latest | date }}</td>
               <td>
-                {{ item.action_phrase }}
-                <a href="{{ item.event.subject_html_url }}">{{ item.event.subject_title }}</a>
+                {{ act.action_phrase }}
+                <a href="{{ act.subject_html_url }}">{{ act.subject_title }}</a>
+                {% if act.count > 1 %}<span class="count">×{{ act.count }}</span>{% endif %}
               </td>
               <td>
-                <a href="/repositories/{{ item.repository.owner }}/{{ item.repository.name }}">
-                  {{ item.repository.full_name }}
+                <a href="/repositories/{{ act.repository.owner }}/{{ act.repository.name }}">
+                  {{ act.repository.full_name }}
                 </a>
               </td>
             </tr>

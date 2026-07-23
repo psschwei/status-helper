@@ -664,11 +664,20 @@ def test_engineer_page_summary_not_configured(
 
 
 def _activity_connector() -> FakeGitHubConnector:
-    """A repo with a spread of recent activity: a merge, a close, and a review."""
+    """A repo with a spread of recent activity: a merge, a close, a review, and — for alice —
+    two comments on the same PR (which the view collapses into one counted row)."""
     return FakeGitHubConnector(
         repository=make_repository(),
         activity=[
             make_activity_record("pr_merged", 42, subject_title="Add X", actor_login="alice"),
+            make_activity_record(
+                "review_submitted", 50, subject_title="Tweak", actor_login="alice",
+                detail="commented", review_id=1,
+            ),
+            make_activity_record(
+                "review_submitted", 50, subject_title="Tweak", actor_login="alice",
+                detail="commented", review_id=2,
+            ),
             make_activity_record("issue_closed", 7, subject_title="A bug", actor_login="bob"),
             make_activity_record(
                 "review_submitted", 42, actor_login="carol", detail="approved", review_id=9
@@ -701,7 +710,8 @@ def test_sync_returns_event_count(
 ) -> None:
     _sync_activity(client, use_connector, use_engineers)
     body = client.post(f"{REPO_PATH}/sync").json()
-    assert body["events"] == 3
+    # Raw event count (before the view's dedup): 5 records were synced.
+    assert body["events"] == 5
 
 
 def test_whats_happened_endpoint_returns_events(
@@ -713,13 +723,16 @@ def test_whats_happened_endpoint_returns_events(
 
     body = client.get("/api/whats-happened", params={"since": _SINCE}).json()
 
-    # Grouped by engineer, ordered by login: alice (merge), bob (issue close), carol (review).
-    assert [eng["login"] for eng in body["engineers"]] == ["alice", "bob", "carol"]
-    all_events = [e for eng in body["engineers"] for e in eng["events"]]
-    kinds = {(e["event"]["kind"], e["event"]["subject_number"]) for e in all_events}
-    assert kinds == {("pr_merged", 42), ("issue_closed", 7), ("review_submitted", 42)}
-    # The repository rides along on each event.
-    assert all_events[0]["repository"]["full_name"] == "octocat/hello-world"
+    # Grouped by engineer, ordered by login: alice, bob, carol.
+    engineers = {eng["login"]: eng for eng in body["engineers"]}
+    assert list(engineers) == ["alice", "bob", "carol"]
+
+    # alice's two comments on PR #50 collapse into one row (count 2); her merge is its own row.
+    alice_phrases = {a["action_phrase"]: a["count"] for a in engineers["alice"]["activities"]}
+    assert alice_phrases == {"merged PR #42": 1, "commented on PR #50": 2}
+
+    # The repository rides along on each aggregated row.
+    assert engineers["bob"]["activities"][0]["repository"]["full_name"] == "octocat/hello-world"
 
 
 def test_whats_happened_endpoint_since_override_filters(
@@ -766,6 +779,9 @@ def test_whats_happened_html_page_renders(
     assert "What's happened since last scrum?" in page.text
     assert "merged PR #42" in page.text
     assert "approved PR #42" in page.text
+    # alice's two comments on PR #50 render as one row with a ×2 count badge.
+    assert "commented on PR #50" in page.text
+    assert "×2" in page.text
     # Grouped by engineer: each actor heads a section linking to their engineer page.
     assert '/engineers/alice"' in page.text
     assert '/engineers/carol"' in page.text

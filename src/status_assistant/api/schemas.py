@@ -10,7 +10,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict
 
 from status_assistant.queries import (
-    ActivityEventItem,
+    AggregatedActivity,
     EngineerActivity,
     EngineerListItem,
     EngineerView,
@@ -208,46 +208,39 @@ class EngineerSummaryOut(BaseModel):
     generated_at: datetime
 
 
-class ActivityEventOut(BaseModel):
-    """One activity event on the wire. ``kind`` serializes to its string value (StrEnum)."""
+class AggregatedActivityOut(BaseModel):
+    """One deduped action row: a phrase + subject, how many times, and when last."""
 
-    model_config = ConfigDict(from_attributes=True)
-
-    kind: str
-    actor_login: str | None
-    subject_type: str
-    subject_number: int
+    action_phrase: str
     subject_title: str
     subject_html_url: str
-    occurred_at: datetime
-    detail: str | None
-
-
-class ActivityEventItemOut(BaseModel):
-    """An activity event paired with the repository it happened in."""
-
-    event: ActivityEventOut
     repository: RepositoryOut
+    count: int
+    latest: datetime
 
     @classmethod
-    def from_item(cls, item: ActivityEventItem) -> "ActivityEventItemOut":
+    def from_item(cls, item: AggregatedActivity) -> "AggregatedActivityOut":
         return cls(
-            event=ActivityEventOut.model_validate(item.event),
+            action_phrase=item.action_phrase,
+            subject_title=item.subject_title,
+            subject_html_url=item.subject_html_url,
             repository=RepositoryOut.model_validate(item.repository),
+            count=item.count,
+            latest=item.latest,
         )
 
 
 class EngineerActivityOut(BaseModel):
-    """One engineer's activity: their login (null for the ghost bucket) and their events."""
+    """One engineer's activity: their login (null for the ghost bucket) and deduped actions."""
 
     login: str | None
-    events: list[ActivityEventItemOut]
+    activities: list[AggregatedActivityOut]
 
     @classmethod
     def from_item(cls, item: EngineerActivity) -> "EngineerActivityOut":
         return cls(
             login=item.login,
-            events=[ActivityEventItemOut.from_item(e) for e in item.events],
+            activities=[AggregatedActivityOut.from_item(a) for a in item.activities],
         )
 
 

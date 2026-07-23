@@ -373,7 +373,7 @@ def test_get_engineer_view_orders_reviews_owed_by_updated_desc(session: Session)
 
 def test_get_whats_happened_groups_by_engineer(session: Session) -> None:
     session.add(make_repository())
-    # bob has two events, alice one — grouped per person, engineers ordered by login.
+    # bob has two actions, alice one — grouped per person, engineers ordered by login.
     session.add(make_activity_event(ActivityKind.PR_MERGED, 1, actor_login="bob"))
     session.add(make_activity_event(ActivityKind.PR_OPENED, 2, actor_login="alice"))
     session.add(make_activity_event(ActivityKind.ISSUE_CLOSED, 3, actor_login="bob"))
@@ -382,33 +382,73 @@ def test_get_whats_happened_groups_by_engineer(session: Session) -> None:
     view = get_whats_happened(session, FIXED_TIME - timedelta(hours=1))
 
     assert [eng.login for eng in view.engineers] == ["alice", "bob"]
-    counts = {eng.login: eng.event_count for eng in view.engineers}
+    counts = {eng.login: eng.action_count for eng in view.engineers}
     assert counts == {"alice": 1, "bob": 2}
-    # The repository rides along on each event, joined without a per-event query.
-    assert view.engineers[0].events[0].repository.full_name == "octocat/hello-world"
+    # The repository rides along on each row, joined without a per-event query.
+    assert view.engineers[0].activities[0].repository.full_name == "octocat/hello-world"
 
 
-def test_get_whats_happened_events_within_engineer_are_newest_first(session: Session) -> None:
+def test_get_whats_happened_dedupes_repeated_action_on_same_subject(session: Session) -> None:
+    """Three comments on the same PR collapse to one row with count 3 and the latest date."""
+    session.add(make_repository())
+    for i, hours in enumerate((1, 2, 3)):
+        session.add(
+            make_activity_event(
+                ActivityKind.REVIEW_SUBMITTED, 7, detail="commented", detail_id=i,
+                occurred_at=FIXED_TIME + timedelta(hours=hours),
+            )
+        )
+    session.commit()
+
+    view = get_whats_happened(session, FIXED_TIME - timedelta(hours=1))
+    (alice,) = view.engineers
+    (row,) = alice.activities  # collapsed to a single row
+    assert row.action_phrase == "commented on PR #7"
+    assert row.count == 3
+    # Most recent of the three. SQLite drops tzinfo on read, so compare the wall-clock value.
+    assert row.latest.replace(tzinfo=None) == (FIXED_TIME + timedelta(hours=3)).replace(
+        tzinfo=None
+    )
+
+
+def test_get_whats_happened_keeps_distinct_phrases_on_same_subject(session: Session) -> None:
+    """Different verbs on one subject are NOT merged: opened and merged PR #5 stay separate."""
     session.add(make_repository())
     session.add(
-        make_activity_event(ActivityKind.PR_OPENED, 1, occurred_at=FIXED_TIME)
+        make_activity_event(ActivityKind.PR_OPENED, 5, occurred_at=FIXED_TIME + timedelta(hours=1))
+    )
+    session.add(
+        make_activity_event(ActivityKind.PR_MERGED, 5, occurred_at=FIXED_TIME + timedelta(hours=2))
+    )
+    session.commit()
+
+    view = get_whats_happened(session, FIXED_TIME - timedelta(hours=1))
+    (alice,) = view.engineers
+    # Two rows, newest-first by latest date; neither is a count>1 merge.
+    assert [a.action_phrase for a in alice.activities] == ["merged PR #5", "opened PR #5"]
+    assert all(a.count == 1 for a in alice.activities)
+
+
+def test_get_whats_happened_rows_are_newest_first(session: Session) -> None:
+    session.add(make_repository())
+    session.add(
+        make_activity_event(ActivityKind.PR_OPENED, 1, occurred_at=FIXED_TIME + timedelta(hours=1))
+    )
+    session.add(
+        make_activity_event(ActivityKind.PR_MERGED, 2, occurred_at=FIXED_TIME + timedelta(hours=3))
     )
     session.add(
         make_activity_event(
-            ActivityKind.PR_MERGED, 2, occurred_at=FIXED_TIME + timedelta(hours=2)
-        )
-    )
-    session.add(
-        make_activity_event(
-            ActivityKind.ISSUE_CLOSED, 3, occurred_at=FIXED_TIME + timedelta(hours=1)
+            ActivityKind.ISSUE_CLOSED, 3, occurred_at=FIXED_TIME + timedelta(hours=2)
         )
     )
     session.commit()
 
-    # All default to actor "alice", so a single engineer bucket, newest-first within it.
     view = get_whats_happened(session, FIXED_TIME - timedelta(hours=1))
     (alice,) = view.engineers
-    assert [item.event.subject_number for item in alice.events] == [2, 3, 1]
+    assert [a.subject_title for a in alice.activities] == [
+        "Subject #2", "Subject #3", "Subject #1"
+    ]
 
 
 def test_get_whats_happened_null_actor_bucket_sorts_last(session: Session) -> None:
@@ -456,7 +496,7 @@ def test_get_whats_happened_empty(session: Session) -> None:
     assert view.since == FIXED_TIME
 
 
-def test_activity_event_item_action_phrase(session: Session) -> None:
+def test_get_whats_happened_action_phrases(session: Session) -> None:
     session.add(make_repository())
     session.add(
         make_activity_event(
@@ -472,8 +512,7 @@ def test_activity_event_item_action_phrase(session: Session) -> None:
     session.commit()
 
     view = get_whats_happened(session, FIXED_TIME)
-    # Both default to actor "alice" → one bucket.
-    (alice,) = view.engineers
-    phrases = {item.event.subject_number: item.action_phrase for item in alice.events}
-    assert phrases[42] == "approved PR #42"
-    assert phrases[9] == "merged PR #9"
+    (alice,) = view.engineers  # both default to actor "alice"
+    phrases = {a.subject_title: a.action_phrase for a in alice.activities}
+    assert phrases["Subject #42"] == "approved PR #42"
+    assert phrases["Subject #9"] == "merged PR #9"

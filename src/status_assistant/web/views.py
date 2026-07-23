@@ -45,7 +45,15 @@ def _format_datetime(value: datetime | None) -> str:
     return value.strftime("%Y-%m-%d %H:%M UTC")
 
 
+def _format_date(value: datetime | None) -> str:
+    """Human-readable UTC date (no time) for templates."""
+    if value is None:
+        return "—"
+    return value.strftime("%Y-%m-%d")
+
+
 templates.env.filters["datetime"] = _format_datetime
+templates.env.filters["date"] = _format_date
 
 router = APIRouter(tags=["web"])
 

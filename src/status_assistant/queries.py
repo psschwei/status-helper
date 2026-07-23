@@ -6,7 +6,7 @@ arrive, this is where their queries live.
 """
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 from sqlmodel import Session, col, func, select
@@ -592,20 +592,41 @@ class ActivityEventItem:
 
 
 @dataclass(frozen=True)
+class AggregatedActivity:
+    """One engineer's repeated identical action on one subject, collapsed into a single row.
+
+    "Identical" means the same rendered ``action_phrase`` on the same subject — so three
+    "commented on PR #7" events become one row with ``count == 3``, while "approved PR #7" (a
+    different phrase) and "merged PR #42" (a different subject) stay their own rows. ``latest`` is
+    the most recent time the action happened; the view sorts and displays by it (as a date). The
+    subject/repository fields are lifted off the representative event so the template can link and
+    label without touching the raw events.
+    """
+
+    action_phrase: str
+    subject_title: str
+    subject_html_url: str
+    repository: Repository
+    count: int
+    latest: datetime
+
+
+@dataclass(frozen=True)
 class EngineerActivity:
-    """One engineer's activity since the scrum: their login and their events, newest first.
+    """One engineer's activity since the scrum: their login and their aggregated actions.
 
     ``login`` is ``None`` for the bucket of events whose actor GitHub didn't report (a deleted
     "ghost" account) — shown only when there's no roster filter, and labeled generically in the
-    UI. ``event_count`` is a convenience for the section header.
+    UI. ``activities`` are deduped (see :class:`AggregatedActivity`) and ordered newest-first by
+    ``latest``. ``action_count`` (distinct rows) drives the section header.
     """
 
     login: str | None
-    events: list[ActivityEventItem]
+    activities: list[AggregatedActivity]
 
     @property
-    def event_count(self) -> int:
-        return len(self.events)
+    def action_count(self) -> int:
+        return len(self.activities)
 
 
 @dataclass(frozen=True)
@@ -619,21 +640,48 @@ class WhatsHappenedView:
     engineers: list[EngineerActivity]
 
 
+def _aggregate(items: list[ActivityEventItem]) -> list[AggregatedActivity]:
+    """Collapse identical (phrase, subject) actions in one engineer's event list into rows.
+
+    ``items`` arrive newest-first. Grouping by ``(action_phrase, subject_html_url)`` merges
+    repeats (e.g. several comments on one PR) into a single :class:`AggregatedActivity`, keeping
+    the latest timestamp and a count. Rows are returned newest-first by ``latest``.
+    """
+    groups: dict[tuple[str, str], AggregatedActivity] = {}
+    for item in items:
+        key = (item.action_phrase, item.event.subject_html_url)
+        existing = groups.get(key)
+        if existing is None:
+            groups[key] = AggregatedActivity(
+                action_phrase=item.action_phrase,
+                subject_title=item.event.subject_title,
+                subject_html_url=item.event.subject_html_url,
+                repository=item.repository,
+                count=1,
+                # items are newest-first, so the first one seen carries the latest time.
+                latest=item.event.occurred_at,
+            )
+        else:
+            groups[key] = replace(existing, count=existing.count + 1)
+    return sorted(groups.values(), key=lambda a: a.latest, reverse=True)
+
+
 def get_whats_happened(
     session: Session,
     since: datetime,
     allowed_logins: set[str] | None = None,
 ) -> WhatsHappenedView:
-    """Return activity since ``since`` grouped by the engineer who did it.
+    """Return activity since ``since`` grouped by the engineer who did it, deduped per action.
 
-    Each :class:`EngineerActivity` holds one person's events, newest first; the engineers
-    themselves are ordered by login (the null-actor "ghost" bucket, if any, sorts last). This is
-    the by-engineer framing a scrum wants — "what has each person been up to" — rather than a
-    flat item timeline. ``since`` is exclusive (``>``), so the scrum instant itself isn't
-    counted. When ``allowed_logins`` is given, only events whose ``actor_login`` is in the roster
-    are returned (null-actor events drop under the filter) — the same roster convention as
-    :func:`list_engineers` / :func:`list_reviewers`. Repositories are fetched in one query and
-    joined in Python (fixed query count), like the helpers above.
+    Each :class:`EngineerActivity` holds one person's :class:`AggregatedActivity` rows — repeated
+    identical actions on the same subject (e.g. multiple comments on one PR) collapsed into a
+    single counted row — ordered newest-first. Engineers are ordered by login (the null-actor
+    "ghost" bucket, if any, sorts last). This is the by-engineer framing a scrum wants — "what
+    has each person been up to" — rather than a flat item timeline. ``since`` is exclusive
+    (``>``), so the scrum instant itself isn't counted. When ``allowed_logins`` is given, only
+    events whose ``actor_login`` is in the roster are returned (null-actor events drop under the
+    filter) — the same roster convention as :func:`list_engineers` / :func:`list_reviewers`.
+    Repositories are fetched in one query and joined in Python (fixed query count).
     """
     statement = (
         select(ActivityEvent)
@@ -661,9 +709,10 @@ def get_whats_happened(
         item = ActivityEventItem(event=event, repository=repositories[event.repository_id])
         by_login.setdefault(event.actor_login, []).append(item)
 
-    # Order engineers by login; the null-actor bucket (if present) sorts last.
+    # Order engineers by login; the null-actor bucket (if present) sorts last. Each engineer's
+    # events are deduped into aggregated rows.
     engineers = [
-        EngineerActivity(login=login, events=items)
+        EngineerActivity(login=login, activities=_aggregate(items))
         for login, items in sorted(
             by_login.items(), key=lambda kv: (kv[0] is None, kv[0] or "")
         )
