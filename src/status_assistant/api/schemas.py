@@ -209,8 +209,9 @@ class EngineerSummaryOut(BaseModel):
 
 
 class AggregatedActivityOut(BaseModel):
-    """One deduped action row: a phrase + subject, how many times, and when last."""
+    """One deduped action row: its section, a phrase + subject, how many times, and when last."""
 
+    group: str
     action_phrase: str
     subject_title: str
     subject_html_url: str
@@ -221,6 +222,7 @@ class AggregatedActivityOut(BaseModel):
     @classmethod
     def from_item(cls, item: AggregatedActivity) -> "AggregatedActivityOut":
         return cls(
+            group=item.group,
             action_phrase=item.action_phrase,
             subject_title=item.subject_title,
             subject_html_url=item.subject_html_url,
@@ -231,16 +233,20 @@ class AggregatedActivityOut(BaseModel):
 
 
 class EngineerActivityOut(BaseModel):
-    """One engineer's activity: their login (null for the ghost bucket) and deduped actions."""
+    """One engineer's activity, split into PR / review / issue sections (each deduped)."""
 
     login: str | None
-    activities: list[AggregatedActivityOut]
+    prs: list[AggregatedActivityOut]
+    reviews: list[AggregatedActivityOut]
+    issues: list[AggregatedActivityOut]
 
     @classmethod
     def from_item(cls, item: EngineerActivity) -> "EngineerActivityOut":
         return cls(
             login=item.login,
-            activities=[AggregatedActivityOut.from_item(a) for a in item.activities],
+            prs=[AggregatedActivityOut.from_item(a) for a in item.prs],
+            reviews=[AggregatedActivityOut.from_item(a) for a in item.reviews],
+            issues=[AggregatedActivityOut.from_item(a) for a in item.issues],
         )
 
 

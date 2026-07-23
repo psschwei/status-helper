@@ -546,20 +546,28 @@ def get_engineer_summary(session: Session, login: str) -> EngineerSummary | None
     return session.get(EngineerSummary, login)
 
 
-# The verb shown for each activity kind, e.g. "merged PR #42". Reviews get their verb from the
-# verdict in ``ActivityEvent.detail`` instead (see ``action_phrase``).
+# The verb shown for each activity kind, e.g. "merged PR #42". A review is always just
+# "reviewed" — the specific verdict (approved / changes-requested / commented) is more detail
+# than a scrum recap needs, and collapsing it lets repeated reviews on one PR dedupe into a
+# single row.
 _ACTIVITY_VERBS = {
     ActivityKind.PR_OPENED: "opened",
     ActivityKind.PR_MERGED: "merged",
     ActivityKind.PR_CLOSED: "closed",
     ActivityKind.ISSUE_OPENED: "opened",
     ActivityKind.ISSUE_CLOSED: "closed",
+    ActivityKind.REVIEW_SUBMITTED: "reviewed",
 }
 
-_REVIEW_VERBS = {
-    "approved": "approved",
-    "changes_requested": "requested changes on",
-    "commented": "commented on",
+# Which section each kind belongs to under an engineer. Reviewing a PR is its own section
+# (distinct from authoring PR lifecycle events), so it isn't lumped with "prs".
+_ACTIVITY_GROUPS = {
+    ActivityKind.PR_OPENED: "prs",
+    ActivityKind.PR_MERGED: "prs",
+    ActivityKind.PR_CLOSED: "prs",
+    ActivityKind.REVIEW_SUBMITTED: "reviews",
+    ActivityKind.ISSUE_OPENED: "issues",
+    ActivityKind.ISSUE_CLOSED: "issues",
 }
 
 
@@ -583,12 +591,14 @@ class ActivityEventItem:
 
     @property
     def action_phrase(self) -> str:
-        """A human verb phrase for the event, e.g. "merged PR #42" / "approved PR #7"."""
-        if self.event.kind is ActivityKind.REVIEW_SUBMITTED:
-            verb = _REVIEW_VERBS.get(self.event.detail or "", "reviewed")
-        else:
-            verb = _ACTIVITY_VERBS.get(self.event.kind, str(self.event.kind))
+        """A human verb phrase for the event, e.g. "merged PR #42" / "reviewed PR #7"."""
+        verb = _ACTIVITY_VERBS.get(self.event.kind, str(self.event.kind))
         return f"{verb} {self.subject_label}"
+
+    @property
+    def group(self) -> str:
+        """The section this event belongs to under an engineer: "prs" / "reviews" / "issues"."""
+        return _ACTIVITY_GROUPS[self.event.kind]
 
 
 @dataclass(frozen=True)
@@ -596,13 +606,14 @@ class AggregatedActivity:
     """One engineer's repeated identical action on one subject, collapsed into a single row.
 
     "Identical" means the same rendered ``action_phrase`` on the same subject — so three
-    "commented on PR #7" events become one row with ``count == 3``, while "approved PR #7" (a
-    different phrase) and "merged PR #42" (a different subject) stay their own rows. ``latest`` is
-    the most recent time the action happened; the view sorts and displays by it (as a date). The
-    subject/repository fields are lifted off the representative event so the template can link and
-    label without touching the raw events.
+    "reviewed PR #7" events become one row with ``count == 3``, while "merged PR #42" (a
+    different subject) stays its own row. ``latest`` is the most recent time the action happened;
+    the view sorts and displays by it (as a date). ``group`` is the section ("prs" / "reviews" /
+    "issues") the row belongs under. The subject/repository fields are lifted off the
+    representative event so the template can link and label without touching the raw events.
     """
 
+    group: str
     action_phrase: str
     subject_title: str
     subject_html_url: str
@@ -613,20 +624,23 @@ class AggregatedActivity:
 
 @dataclass(frozen=True)
 class EngineerActivity:
-    """One engineer's activity since the scrum: their login and their aggregated actions.
+    """One engineer's activity since the scrum, split into PR / review / issue sections.
 
     ``login`` is ``None`` for the bucket of events whose actor GitHub didn't report (a deleted
     "ghost" account) — shown only when there's no roster filter, and labeled generically in the
-    UI. ``activities`` are deduped (see :class:`AggregatedActivity`) and ordered newest-first by
-    ``latest``. ``action_count`` (distinct rows) drives the section header.
+    UI. Each of ``prs`` / ``reviews`` / ``issues`` is a list of deduped
+    :class:`AggregatedActivity` rows ordered newest-first (empty when the engineer did nothing of
+    that kind). ``action_count`` (distinct rows across all sections) drives the header.
     """
 
     login: str | None
-    activities: list[AggregatedActivity]
+    prs: list[AggregatedActivity]
+    reviews: list[AggregatedActivity]
+    issues: list[AggregatedActivity]
 
     @property
     def action_count(self) -> int:
-        return len(self.activities)
+        return len(self.prs) + len(self.reviews) + len(self.issues)
 
 
 @dataclass(frozen=True)
@@ -653,6 +667,7 @@ def _aggregate(items: list[ActivityEventItem]) -> list[AggregatedActivity]:
         existing = groups.get(key)
         if existing is None:
             groups[key] = AggregatedActivity(
+                group=item.group,
                 action_phrase=item.action_phrase,
                 subject_title=item.event.subject_title,
                 subject_html_url=item.event.subject_html_url,
@@ -710,11 +725,19 @@ def get_whats_happened(
         by_login.setdefault(event.actor_login, []).append(item)
 
     # Order engineers by login; the null-actor bucket (if present) sorts last. Each engineer's
-    # events are deduped into aggregated rows.
-    engineers = [
-        EngineerActivity(login=login, activities=_aggregate(items))
-        for login, items in sorted(
-            by_login.items(), key=lambda kv: (kv[0] is None, kv[0] or "")
+    # events are deduped into aggregated rows, then split into PR / review / issue sections
+    # (each already newest-first, since ``_aggregate`` sorts).
+    engineers = []
+    for login, items in sorted(
+        by_login.items(), key=lambda kv: (kv[0] is None, kv[0] or "")
+    ):
+        aggregated = _aggregate(items)
+        engineers.append(
+            EngineerActivity(
+                login=login,
+                prs=[a for a in aggregated if a.group == "prs"],
+                reviews=[a for a in aggregated if a.group == "reviews"],
+                issues=[a for a in aggregated if a.group == "issues"],
+            )
         )
-    ]
     return WhatsHappenedView(since=since, engineers=engineers)

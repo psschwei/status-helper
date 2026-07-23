@@ -113,6 +113,16 @@ th {
 }
 tbody tr:last-child td { border-bottom: none; }
 .num { color: var(--muted); width: 3rem; }
+
+/* Sub-section heading within an engineer panel (PRs / Reviews / Issues). */
+.activity-group {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  margin: 1rem 0 0.25rem;
+}
+.activity-group:first-of-type { margin-top: 0.25rem; }
 .when { color: var(--muted); font-size: 0.85rem; white-space: nowrap; width: 10rem; }
 
 .badge {

@@ -727,12 +727,18 @@ def test_whats_happened_endpoint_returns_events(
     engineers = {eng["login"]: eng for eng in body["engineers"]}
     assert list(engineers) == ["alice", "bob", "carol"]
 
-    # alice's two comments on PR #50 collapse into one row (count 2); her merge is its own row.
-    alice_phrases = {a["action_phrase"]: a["count"] for a in engineers["alice"]["activities"]}
-    assert alice_phrases == {"merged PR #42": 1, "commented on PR #50": 2}
+    # alice's activity splits into sections: a merge under PRs, her two reviews of PR #50
+    # collapsed into one Reviews row (count 2), and no issues.
+    assert {a["action_phrase"]: a["count"] for a in engineers["alice"]["prs"]} == {
+        "merged PR #42": 1
+    }
+    assert {a["action_phrase"]: a["count"] for a in engineers["alice"]["reviews"]} == {
+        "reviewed PR #50": 2
+    }
+    assert engineers["alice"]["issues"] == []
 
-    # The repository rides along on each aggregated row.
-    assert engineers["bob"]["activities"][0]["repository"]["full_name"] == "octocat/hello-world"
+    # bob's only action is closing an issue → the Issues section; the repository rides along.
+    assert engineers["bob"]["issues"][0]["repository"]["full_name"] == "octocat/hello-world"
 
 
 def test_whats_happened_endpoint_since_override_filters(
@@ -778,13 +784,17 @@ def test_whats_happened_html_page_renders(
     assert page.status_code == 200
     assert "What's happened since last scrum?" in page.text
     assert "merged PR #42" in page.text
-    assert "approved PR #42" in page.text
-    # alice's two comments on PR #50 render as one row with a ×2 count badge.
-    assert "commented on PR #50" in page.text
+    assert "reviewed PR #42" in page.text  # carol's approval, verdict collapsed to "reviewed"
+    # alice's two reviews of PR #50 render as one row with a ×2 count badge.
+    assert "reviewed PR #50" in page.text
     assert "×2" in page.text
     # Grouped by engineer: each actor heads a section linking to their engineer page.
     assert '/engineers/alice"' in page.text
     assert '/engineers/carol"' in page.text
+    # Within an engineer, activity is split into PR / Review / Issue sub-sections.
+    assert "PRs" in page.text
+    assert "Reviews" in page.text
+    assert "Issues" in page.text
     # The datetime-local override box is present and pre-filled.
     assert 'type="datetime-local"' in page.text
 

@@ -1,6 +1,34 @@
 {% extends "base.html" %}
 {% block title %}Since last scrum — Engineering Status Assistant{% endblock %}
 
+{% macro activity_table(title, rows) %}
+  {% if rows %}
+    <h3 class="activity-group">{{ title }} <span class="count">{{ rows | length }}</span></h3>
+    <table>
+      <thead>
+        <tr><th>Date</th><th>What</th><th>Where</th></tr>
+      </thead>
+      <tbody>
+        {% for act in rows %}
+          <tr>
+            <td>{{ act.latest | date }}</td>
+            <td>
+              {{ act.action_phrase }}
+              <a href="{{ act.subject_html_url }}">{{ act.subject_title }}</a>
+              {% if act.count > 1 %}<span class="count">×{{ act.count }}</span>{% endif %}
+            </td>
+            <td>
+              <a href="/repositories/{{ act.repository.owner }}/{{ act.repository.name }}">
+                {{ act.repository.full_name }}
+              </a>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+{% endmacro %}
+
 {% block content %}
 <section class="repo-header">
   <h1>What's happened since last scrum?</h1>
@@ -23,28 +51,9 @@
         {% endif %}
         <span class="count">{{ eng.action_count }}</span>
       </h2>
-      <table>
-        <thead>
-          <tr><th>Date</th><th>What</th><th>Where</th></tr>
-        </thead>
-        <tbody>
-          {% for act in eng.activities %}
-            <tr>
-              <td>{{ act.latest | date }}</td>
-              <td>
-                {{ act.action_phrase }}
-                <a href="{{ act.subject_html_url }}">{{ act.subject_title }}</a>
-                {% if act.count > 1 %}<span class="count">×{{ act.count }}</span>{% endif %}
-              </td>
-              <td>
-                <a href="/repositories/{{ act.repository.owner }}/{{ act.repository.name }}">
-                  {{ act.repository.full_name }}
-                </a>
-              </td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
+      {{ activity_table("PRs", eng.prs) }}
+      {{ activity_table("Reviews", eng.reviews) }}
+      {{ activity_table("Issues", eng.issues) }}
     </section>
   {% endfor %}
 {% else %}
