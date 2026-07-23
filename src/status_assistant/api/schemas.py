@@ -10,12 +10,14 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict
 
 from status_assistant.queries import (
+    ActivityEventItem,
     EngineerListItem,
     EngineerView,
     RepositoryListItem,
     RepositoryView,
     ReviewerListItem,
     ReviewItem,
+    WhatsHappenedView,
 )
 
 
@@ -205,6 +207,49 @@ class EngineerSummaryOut(BaseModel):
     generated_at: datetime
 
 
+class ActivityEventOut(BaseModel):
+    """One activity event on the wire. ``kind`` serializes to its string value (StrEnum)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    kind: str
+    actor_login: str | None
+    subject_type: str
+    subject_number: int
+    subject_title: str
+    subject_html_url: str
+    occurred_at: datetime
+    detail: str | None
+
+
+class ActivityEventItemOut(BaseModel):
+    """An activity event paired with the repository it happened in."""
+
+    event: ActivityEventOut
+    repository: RepositoryOut
+
+    @classmethod
+    def from_item(cls, item: ActivityEventItem) -> "ActivityEventItemOut":
+        return cls(
+            event=ActivityEventOut.model_validate(item.event),
+            repository=RepositoryOut.model_validate(item.repository),
+        )
+
+
+class WhatsHappenedOut(BaseModel):
+    """The "what's happened since last scrum?" payload: the effective ``since`` and the events."""
+
+    since: datetime
+    events: list[ActivityEventItemOut]
+
+    @classmethod
+    def from_view(cls, view: WhatsHappenedView) -> "WhatsHappenedOut":
+        return cls(
+            since=view.since,
+            events=[ActivityEventItemOut.from_item(e) for e in view.events],
+        )
+
+
 class SyncResultOut(BaseModel):
     """Summary returned by the sync endpoint."""
 
@@ -214,4 +259,5 @@ class SyncResultOut(BaseModel):
     full_name: str
     pull_requests: int
     issues: int
+    events: int
     last_synced_at: datetime

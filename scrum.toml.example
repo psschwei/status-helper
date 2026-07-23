@@ -1,0 +1,17 @@
+# Copy to scrum.toml and edit to change the scrum schedule. scrum.toml is
+# gitignored (it's your team's personal cadence); this template is committed.
+#
+# This file is OPTIONAL: with no scrum.toml, the "what's happened since last
+# scrum?" view uses the built-in default below (Mon/Wed/Fri 11:00 America/New_York).
+# You only need the file to change the schedule. The view also has a "Since" box
+# for moving the window on the fly without touching this file.
+#
+# Structural config (no secrets — tokens stay in .env).
+
+[scrum]
+# Weekday names, three-letter lowercased: mon tue wed thu fri sat sun.
+days = ["mon", "wed", "fri"]
+# 24-hour wall-clock time in the timezone below.
+time = "11:00"
+# IANA timezone name. Daylight saving is handled automatically.
+timezone = "America/New_York"

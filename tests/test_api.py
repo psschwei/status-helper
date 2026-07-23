@@ -6,14 +6,18 @@ exercised without touching GitHub.
 """
 
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 
 from status_assistant.engineers_config import EngineerRef
+from status_assistant.scrum_config import ScrumSchedule
 from tests.conftest import (
+    RECENT_TIME,
     FakeGitHubConnector,
     FakeMultiRepoConnector,
     FakeSummarizer,
+    make_activity_record,
     make_issue,
     make_pull_request,
     make_repository,
@@ -23,6 +27,7 @@ InstallConnector = Callable[[FakeGitHubConnector | FakeMultiRepoConnector], None
 InstallRepos = Callable[[list[tuple[str, str]]], None]
 InstallEngineers = Callable[[list[EngineerRef]], None]
 InstallSummarizer = Callable[[FakeSummarizer], None]
+InstallScrum = Callable[[ScrumSchedule], None]
 
 REPO_PATH = "/api/repositories/octocat/hello-world"
 WEB_PATH = "/repositories/octocat/hello-world"
@@ -653,3 +658,132 @@ def test_engineer_page_summary_not_configured(
     page = client.get("/engineers/alice")
     assert "not configured" in page.text
     assert "Generate summary" not in page.text
+
+
+# --- What's happened since last scrum ---------------------------------------------
+
+
+def _activity_connector() -> FakeGitHubConnector:
+    """A repo with a spread of recent activity: a merge, a close, and a review."""
+    return FakeGitHubConnector(
+        repository=make_repository(),
+        activity=[
+            make_activity_record("pr_merged", 42, subject_title="Add X", actor_login="alice"),
+            make_activity_record("issue_closed", 7, subject_title="A bug", actor_login="bob"),
+            make_activity_record(
+                "review_submitted", 42, actor_login="carol", detail="approved", review_id=9
+            ),
+        ],
+    )
+
+
+def _sync_activity(
+    client: TestClient,
+    use_connector: InstallConnector,
+    use_engineers: InstallEngineers,
+) -> None:
+    # Install an empty roster (show-everyone) so the view isn't filtered by the real
+    # engineers.toml on disk — the seeded actors (alice/bob/carol) aren't in it.
+    use_engineers([])
+    use_connector(_activity_connector())
+    client.post(f"{REPO_PATH}/sync")
+
+
+# An ISO `since` comfortably before RECENT_TIME (which is ~yesterday), so all seeded events fall
+# inside the window regardless of what day the test runs.
+_SINCE = (RECENT_TIME - timedelta(days=2)).isoformat()
+
+
+def test_sync_returns_event_count(
+    client: TestClient,
+    use_connector: InstallConnector,
+    use_engineers: InstallEngineers,
+) -> None:
+    _sync_activity(client, use_connector, use_engineers)
+    body = client.post(f"{REPO_PATH}/sync").json()
+    assert body["events"] == 3
+
+
+def test_whats_happened_endpoint_returns_events(
+    client: TestClient,
+    use_connector: InstallConnector,
+    use_engineers: InstallEngineers,
+) -> None:
+    _sync_activity(client, use_connector, use_engineers)
+
+    body = client.get("/api/whats-happened", params={"since": _SINCE}).json()
+
+    assert len(body["events"]) == 3
+    kinds = {(e["event"]["kind"], e["event"]["subject_number"]) for e in body["events"]}
+    assert kinds == {("pr_merged", 42), ("issue_closed", 7), ("review_submitted", 42)}
+    # The repository rides along on each event.
+    assert body["events"][0]["repository"]["full_name"] == "octocat/hello-world"
+
+
+def test_whats_happened_endpoint_since_override_filters(
+    client: TestClient,
+    use_connector: InstallConnector,
+    use_engineers: InstallEngineers,
+) -> None:
+    _sync_activity(client, use_connector, use_engineers)
+
+    # A `since` in the future excludes everything.
+    future = (datetime.now(UTC) + timedelta(days=1)).isoformat()
+    body = client.get("/api/whats-happened", params={"since": future}).json()
+    assert body["events"] == []
+
+
+def test_whats_happened_endpoint_invalid_since_is_422(client: TestClient) -> None:
+    resp = client.get("/api/whats-happened?since=not-a-date")
+    assert resp.status_code == 422
+
+
+def test_whats_happened_endpoint_filtered_by_roster(
+    client: TestClient,
+    use_connector: InstallConnector,
+    use_engineers: InstallEngineers,
+) -> None:
+    _sync_activity(client, use_connector, use_engineers)
+    use_engineers([EngineerRef(name="Alice", handles=["alice"])])
+
+    body = client.get("/api/whats-happened", params={"since": _SINCE}).json()
+    # Only alice's event (the pr_merged) survives the roster filter.
+    actors = {e["event"]["actor_login"] for e in body["events"]}
+    assert actors == {"alice"}
+
+
+def test_whats_happened_html_page_renders(
+    client: TestClient,
+    use_connector: InstallConnector,
+    use_engineers: InstallEngineers,
+) -> None:
+    _sync_activity(client, use_connector, use_engineers)
+
+    page = client.get("/whats-happened", params={"since": _SINCE})
+
+    assert page.status_code == 200
+    assert "What's happened since last scrum?" in page.text
+    assert "merged PR #42" in page.text
+    assert "approved PR #42" in page.text
+    # The datetime-local override box is present and pre-filled.
+    assert 'type="datetime-local"' in page.text
+
+
+def test_whats_happened_html_prefills_default_since(
+    client: TestClient, use_scrum: InstallScrum
+) -> None:
+    # A fixed schedule makes the default `since` box value deterministic. With nothing synced
+    # the page still renders 200 with the box pre-filled to the computed scrum time.
+    use_scrum(ScrumSchedule(days=["mon", "wed", "fri"], time="11:00", timezone="America/New_York"))
+
+    page = client.get("/whats-happened")
+
+    assert page.status_code == 200
+    # The pre-filled value is a local datetime-local string at the scrum minute.
+    assert 'value="' in page.text and "T11:00" in page.text
+
+
+def test_whats_happened_page_empty_state(client: TestClient) -> None:
+    resp = client.get("/whats-happened")
+    assert resp.status_code == 200
+    assert "No activity since" in resp.text

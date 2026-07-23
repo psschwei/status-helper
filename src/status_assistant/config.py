@@ -14,6 +14,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from status_assistant.engineers_config import EngineerRef, load_engineers
 from status_assistant.repos_config import RepoRef, load_repos
+from status_assistant.scrum_config import ScrumSchedule, load_scrum
 
 
 class Settings(BaseSettings):
@@ -48,6 +49,12 @@ class Settings(BaseSettings):
     # Kept out of .env because it is structural config, not a secret.
     engineers_config_path: str = "./engineers.toml"
 
+    # --- The scrum schedule (for the "what's happened since last scrum?" view) ---
+    # Path to the TOML file with the recurring scrum schedule (see scrum_config / scrum.toml).
+    # Optional: a missing file means the built-in default (Mon/Wed/Fri 11:00 America/New_York).
+    # Kept out of .env because it is structural config, not a secret.
+    scrum_config_path: str = "./scrum.toml"
+
     # --- LLM (AI summaries) ---
     # An OpenAI-compatible endpoint — a LiteLLM proxy in front of any provider, or a
     # provider's own API. Summaries are optional: without ``llm_api_key`` the feature is
@@ -72,6 +79,10 @@ class Settings(BaseSettings):
     def load_engineers(self) -> list[EngineerRef]:
         """Return the engineer roster, read from ``engineers_config_path`` (``[]`` if none)."""
         return load_engineers(self.engineers_config_path)
+
+    def load_scrum(self) -> ScrumSchedule:
+        """Return the scrum schedule, read from ``scrum_config_path`` (default if none)."""
+        return load_scrum(self.scrum_config_path)
 
 
 @lru_cache

@@ -5,6 +5,7 @@ Two capabilities: trigger a sync, and read the view. Paths are repo-scoped
 redesign, even though slice 1 only wires the configured one.
 """
 
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -20,21 +21,28 @@ from status_assistant.api.schemas import (
     RepositoryViewOut,
     ReviewerListItemOut,
     SyncResultOut,
+    WhatsHappenedOut,
 )
 from status_assistant.config import Settings, get_settings
 from status_assistant.connectors.base import GitHubConnector
 from status_assistant.db import get_session
 from status_assistant.dependencies import get_connector, get_optional_summarizer
 from status_assistant.engineers_config import allowed_logins
-from status_assistant.ingestion.sync import sync_all, sync_repository
+from status_assistant.ingestion.sync import (
+    prune_activity_events,
+    sync_all,
+    sync_repository,
+)
 from status_assistant.queries import (
     get_engineer_summary,
     get_engineer_view,
     get_repository_view,
+    get_whats_happened,
     list_engineers,
     list_repositories,
     list_reviewers,
 )
+from status_assistant.scrum_config import last_scrum_before
 
 router = APIRouter(prefix="/api/repositories", tags=["repositories"])
 
@@ -62,6 +70,9 @@ def sync_all_repositories(
 def sync(owner: str, name: str, session: SessionDep, connector: ConnectorDep) -> SyncResultOut:
     """Fetch the repository's open PRs and issues from GitHub and persist them."""
     result = sync_repository(session, connector, owner, name)
+    # Trim old activity history on this single-repo sync too, so the append-only table stays
+    # bounded regardless of which sync entry point is used (sync_all prunes on its own).
+    prune_activity_events(session)
     return SyncResultOut.model_validate(result)
 
 
@@ -127,6 +138,37 @@ def list_reviewers_view(session: SessionDep, settings: SettingsDep) -> list[Revi
     """
     allowed = allowed_logins(settings.load_engineers())
     return [ReviewerListItemOut.from_item(item) for item in list_reviewers(session, allowed)]
+
+
+# Activity ("what's happened since last scrum?") is a *derived* axis over the append-only
+# ActivityEvent log — no ingestion of its own, so a separate router again, like engineers/reviews.
+activity_router = APIRouter(prefix="/api/whats-happened", tags=["activity"])
+
+
+@activity_router.get("", response_model=WhatsHappenedOut)
+def whats_happened_view(
+    session: SessionDep, settings: SettingsDep, since: str | None = None
+) -> WhatsHappenedOut:
+    """Return activity events since ``since`` (default: the most recent scheduled scrum).
+
+    ``since`` accepts an ISO-8601 datetime; a naive value is treated as UTC. An unparseable
+    value is a 422 — a clean contract for API callers (the HTML page, by contrast, falls back
+    to the default). Limited to the configured engineer roster when one exists.
+    """
+    if since is None:
+        effective_since = last_scrum_before(settings.load_scrum(), datetime.now(UTC))
+    else:
+        try:
+            parsed = datetime.fromisoformat(since)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422, detail=f"Invalid 'since' datetime: {since!r}."
+            ) from exc
+        effective_since = parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    allowed = allowed_logins(settings.load_engineers())
+    return WhatsHappenedOut.from_view(
+        get_whats_happened(session, effective_since, allowed)
+    )
 
 
 SummarizerDep = Annotated[AISummarizer | None, Depends(get_optional_summarizer)]

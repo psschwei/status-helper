@@ -10,23 +10,42 @@ issues wholesale (delete the repo's existing rows, insert the freshly-fetched se
 idempotent by construction and, crucially, drops items that have since closed — a merged PR
 correctly disappears from the active view. It's the simplest correct behavior for an
 active-only cache; incremental/closed-history strategies belong to a later slice.
+
+Activity events are the exception to the snapshot model: they're an append-only history that
+sync only ever inserts into (see ``sync_repository``). The single place they're deleted is
+:func:`prune_activity_events`, a bounded retention sweep run once per top-level sync so the
+history doesn't grow forever — never during the per-repository fetch itself.
 """
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlmodel import Session, col, delete, select
 
 from status_assistant.connectors.base import GitHubConnector
 from status_assistant.models import (
+    ActivityEvent,
+    ActivityKind,
     Issue,
     IssueAssignee,
     PRReviewRequest,
     PullRequest,
     PullRequestIssueLink,
+    build_event_key,
 )
 from status_assistant.repos_config import RepoRef
+
+# How far back each sync fetches activity events. Wide enough to span a Mon→Fri→Mon scrum gap
+# plus slack for a missed sync; safe to over-fetch because events upsert by a deterministic key,
+# so re-observing an overlapping window inserts no duplicates.
+_ACTIVITY_LOOKBACK = timedelta(days=14)
+
+# How long an activity event is kept before it's purged. A scrum recap only ever looks back a
+# few days, so older events are dead weight in an otherwise append-only table. Must stay
+# comfortably larger than ``_ACTIVITY_LOOKBACK`` so a purge never deletes something the next
+# sync would immediately re-fetch (which would just churn the same rows).
+_ACTIVITY_RETENTION = timedelta(days=28)
 
 
 @dataclass(frozen=True)
@@ -37,6 +56,7 @@ class SyncResult:
     full_name: str
     pull_requests: int
     issues: int
+    events: int
     last_synced_at: datetime
 
 
@@ -49,12 +69,13 @@ def sync_repository(
     placeholder ``repository_id``; this layer owns the ``Repository`` row and stamps the real
     id onto each child before insert.
     """
+    now = datetime.now(UTC)
     repository = connector.get_repository(owner, name)
     pull_requests = connector.list_pull_requests(owner, name, state="open")
     issues = connector.list_issues(owner, name, state="open")
     links = connector.list_closing_issue_links(owner, name)
+    activity = connector.list_activity_since(owner, name, since=now - _ACTIVITY_LOOKBACK)
 
-    now = datetime.now(UTC)
     repository.last_synced_at = now
 
     # Upsert the repository row (id is GitHub's, so merge is an upsert-by-id).
@@ -124,6 +145,31 @@ def sync_repository(
     }:
         session.add(PullRequestIssueLink(pull_request_id=pr_id, issue_id=issue_id))
 
+    # Append activity events. Unlike the snapshot rows above, these are an append-only history:
+    # there is deliberately NO delete of prior ``ActivityEvent`` rows, so a PR that has since
+    # merged keeps its "opened"/"merged" events even though its snapshot row is gone. ``merge``
+    # upserts by the deterministic key, so re-observing an event in an overlapping window
+    # updates the row (e.g. a retitled subject) rather than duplicating it.
+    for rec in activity:
+        kind = ActivityKind(rec.kind)
+        key = build_event_key(
+            repository.id, rec.subject_type, rec.subject_number, kind, rec.review_id
+        )
+        session.merge(
+            ActivityEvent(
+                id=key,
+                kind=kind,
+                repository_id=repository.id,
+                actor_login=rec.actor_login,
+                subject_type=rec.subject_type,
+                subject_number=rec.subject_number,
+                subject_title=rec.subject_title,
+                subject_html_url=rec.subject_html_url,
+                occurred_at=rec.occurred_at,
+                detail=rec.detail,
+            )
+        )
+
     session.commit()
 
     return SyncResult(
@@ -131,8 +177,29 @@ def sync_repository(
         full_name=repository.full_name,
         pull_requests=len(pull_requests),
         issues=len(issues),
+        events=len(activity),
         last_synced_at=now,
     )
+
+
+def prune_activity_events(
+    session: Session, *, now: datetime | None = None, retention: timedelta = _ACTIVITY_RETENTION
+) -> int:
+    """Delete activity events older than ``retention``, returning how many were removed.
+
+    The one place ``ActivityEvent`` rows are ever deleted. Sync itself is append-only; this is a
+    separate, explicitly-bounded retention sweep so old scrum activity doesn't accumulate
+    forever. It runs globally (across all repositories) in a single delete, and commits its own
+    transaction so it's independent of any per-repository sync commit. ``now`` is injectable for
+    deterministic tests.
+    """
+    cutoff = (now or datetime.now(UTC)) - retention
+    result = session.exec(
+        delete(ActivityEvent).where(col(ActivityEvent.occurred_at) < cutoff)
+    )
+    session.commit()
+    # SQLAlchemy's CursorResult exposes the affected row count on ``rowcount``.
+    return int(getattr(result, "rowcount", 0) or 0)
 
 
 def sync_all(
@@ -146,5 +213,10 @@ def sync_all(
     repository — so a failure syncing one repo does not roll back the repos already
     persisted. This slice has a single GitHub instance, so all repos share one ``connector``;
     resolving a connector per repository (for multiple instances) is a later, additive change.
+
+    After syncing, old activity events are purged once (globally) — the append-only history is
+    the only table that grows unbounded, so a sync is the natural moment to trim it.
     """
-    return [sync_repository(session, connector, repo.owner, repo.name) for repo in repos]
+    results = [sync_repository(session, connector, repo.owner, repo.name) for repo in repos]
+    prune_activity_events(session)
+    return results

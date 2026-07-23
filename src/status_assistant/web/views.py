@@ -6,7 +6,7 @@ repo isn't an error in the browser — it's the expected first-run state).
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -27,10 +27,12 @@ from status_assistant.queries import (
     get_engineer_summary,
     get_engineer_view,
     get_repository_view,
+    get_whats_happened,
     list_engineers,
     list_repositories,
     list_reviewers,
 )
+from status_assistant.scrum_config import ScrumSchedule, last_scrum_before
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
@@ -175,6 +177,57 @@ def reviews_page(request: Request, session: SessionDep, settings: SettingsDep) -
         request,
         "reviews.html",
         {"reviewers": list_reviewers(session, allowed)},
+    )
+
+
+def _parse_since_web(value: str | None, schedule: ScrumSchedule) -> datetime | None:
+    """Parse the ``since`` box's value, or ``None`` to fall back to the computed default.
+
+    The ``<input type="datetime-local">`` submits a naive wall-clock string (``YYYY-MM-DDTHH:MM``)
+    the user reads in their scrum timezone, so a naive value is interpreted in that timezone and
+    converted to UTC. A fully-qualified value is honored as-is. Anything unparseable returns
+    ``None`` so the page degrades gracefully to the default scrum time (the JSON API, by
+    contrast, 422s) rather than erroring on a stray keystroke.
+    """
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=schedule.tzinfo)
+    return parsed.astimezone(UTC)
+
+
+def _since_input_value(since: datetime, schedule: ScrumSchedule) -> str:
+    """Format an effective (UTC) ``since`` for the datetime-local box, in the scrum timezone."""
+    return since.astimezone(schedule.tzinfo).strftime("%Y-%m-%dT%H:%M")
+
+
+@router.get("/whats-happened", response_class=HTMLResponse)
+def whats_happened_page(
+    request: Request, session: SessionDep, settings: SettingsDep, since: str | None = None
+) -> HTMLResponse:
+    """Activity since the last scrum: what was opened / merged / closed / reviewed.
+
+    The default ``since`` is the most recent scheduled scrum (from ``scrum.toml``, or the
+    built-in Mon/Wed/Fri 11:00 ET default). The ``?since=`` box lets the user move the window on
+    the fly; an unparseable value falls back to the default. Limited to the configured engineer
+    roster when one exists, the same filter the other people-axis views use.
+    """
+    schedule = settings.load_scrum()
+    effective_since = _parse_since_web(since, schedule) or last_scrum_before(
+        schedule, datetime.now(UTC)
+    )
+    allowed = allowed_logins(settings.load_engineers())
+    return templates.TemplateResponse(
+        request,
+        "whats-happened.html",
+        {
+            "view": get_whats_happened(session, effective_since, allowed),
+            "since_input": _since_input_value(effective_since, schedule),
+        },
     )
 
 

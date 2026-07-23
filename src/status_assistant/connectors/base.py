@@ -11,6 +11,7 @@ changing this interface. Supporting an entirely different source (Slack, Jira) w
 """
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Protocol
 
 from status_assistant.models import Issue, PullRequest, Repository
@@ -42,6 +43,34 @@ class PullRequestWithReviewers:
 
     pull_request: PullRequest
     requested_reviewer_logins: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ActivityRecord:
+    """One activity event observed from GitHub, source-shaped but vendor-free.
+
+    The connector reports *what happened* — the kind, subject, actor, and time — but not the
+    ``repository_id``: it doesn't yet know the repository's numeric id (the same reason
+    ``PullRequest.repository_id`` is left at ``0``). The ingestion layer owns the ``Repository``
+    row, stamps the real id, and turns each record into an ``ActivityEvent`` with its
+    deterministic key. Keeping this a distinct connector type (not the ``ActivityEvent`` model)
+    preserves the "the connector returns domain models, never vendor types" rule without leaking
+    the storage key up into the connector.
+
+    ``review_id`` is set only for ``review_submitted`` records — GitHub's review id, which the
+    ingestion layer feeds into the event key so multiple reviews by one person on one PR stay
+    distinct rows.
+    """
+
+    kind: str  # matches an ActivityKind value
+    subject_type: str  # "pr" | "issue"
+    subject_number: int
+    subject_title: str
+    subject_html_url: str
+    actor_login: str | None
+    occurred_at: datetime
+    detail: str | None = None  # review verdict, for review_submitted
+    review_id: int | None = None  # GitHub review id, for review_submitted
 
 
 class GitHubConnector(Protocol):
@@ -77,5 +106,18 @@ class GitHubConnector(Protocol):
         them against the rows it just fetched without any extra lookup. Sourced from GitHub's
         ``closingIssuesReferences`` (both closing keywords and manually-linked issues); the
         set is unfiltered here, and ingestion drops links to issues it doesn't cache.
+        """
+        ...
+
+    def list_activity_since(
+        self, owner: str, name: str, *, since: datetime
+    ) -> list[ActivityRecord]:
+        """List activity events that occurred at or after ``since``.
+
+        Covers PR opened / merged / closed, issue opened / closed, and submitted reviews — the
+        durable-history source behind the "what's happened since last scrum?" view. ``since``
+        bounds how far back (and therefore how much) is fetched, so the caller controls API
+        cost. Unlike the open-snapshot lists above, the returned events include items that have
+        since closed or merged; the ingestion layer appends them to a log it never deletes.
         """
         ...

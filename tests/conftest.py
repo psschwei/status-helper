@@ -7,7 +7,7 @@ with the app's session and connector dependencies overridden to use them.
 
 import os
 from collections.abc import Callable, Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 # Provide the settings the app needs *before* status_assistant.config is imported, so tests
 # are hermetic: ``get_settings()`` (called directly by the app's lifespan, not via a
@@ -25,6 +25,7 @@ from sqlmodel.pool import StaticPool  # noqa: E402
 from status_assistant.ai.base import SummaryPrompt  # noqa: E402
 from status_assistant.config import get_settings  # noqa: E402
 from status_assistant.connectors.base import (  # noqa: E402
+    ActivityRecord,
     IssueWithAssignees,
     PullRequestWithReviewers,
 )
@@ -33,16 +34,25 @@ from status_assistant.dependencies import get_connector, get_optional_summarizer
 from status_assistant.engineers_config import EngineerRef  # noqa: E402
 from status_assistant.main import app  # noqa: E402
 from status_assistant.models import (  # noqa: E402
+    ActivityEvent,
+    ActivityKind,
     Issue,
     IssueAssignee,
     PRReviewRequest,
     PullRequest,
     PullRequestIssueLink,
     Repository,
+    build_event_key,
 )
 from status_assistant.repos_config import RepoRef  # noqa: E402
+from status_assistant.scrum_config import ScrumSchedule  # noqa: E402
 
 FIXED_TIME = datetime(2026, 6, 15, 12, 0, tzinfo=UTC)
+
+# A timestamp guaranteed to fall inside sync's activity lookback window (now - 14 days),
+# computed at import relative to the real clock. Used as the default ``occurred_at`` for
+# activity records so a plain ``make_activity_record`` is fetched by a real ``sync_repository``.
+RECENT_TIME = datetime.now(UTC) - timedelta(days=1)
 
 
 @pytest.fixture
@@ -84,6 +94,7 @@ class FakeGitHubConnector:
         assignees: dict[int, list[str]] | None = None,
         reviewers: dict[int, list[str]] | None = None,
         links: list[tuple[int, int]] | None = None,
+        activity: list[ActivityRecord] | None = None,
     ) -> None:
         self._repository = repository
         self._pull_requests = pull_requests or []
@@ -98,6 +109,10 @@ class FakeGitHubConnector:
         # Canned (pull_request_id, issue_id) closing links, mirroring the real connector's
         # ``list_closing_issue_links``. Unfiltered — ingestion drops links to un-cached issues.
         self._links = links or []
+        # Canned activity records for ``list_activity_since``. ``ActivityRecord`` is a frozen
+        # plain dataclass (not a SQLModel table), so unlike the models above it can be returned
+        # as-is without a model_dump round-trip.
+        self._activity = activity or []
 
     # Rebuild fresh instances from field values on every call. A real connector returns new
     # objects each time; more importantly, ``model_copy()`` on a SQLModel *table* instance
@@ -131,6 +146,12 @@ class FakeGitHubConnector:
     def list_closing_issue_links(self, owner: str, name: str) -> list[tuple[int, int]]:
         return list(self._links)
 
+    def list_activity_since(
+        self, owner: str, name: str, *, since: datetime
+    ) -> list[ActivityRecord]:
+        # Filter by the window like the real connector, so tests exercise the ``since`` bound.
+        return [rec for rec in self._activity if rec.occurred_at >= since]
+
 
 class FakeMultiRepoConnector:
     """A ``GitHubConnector`` serving different canned data per ``owner/name``.
@@ -161,6 +182,11 @@ class FakeMultiRepoConnector:
 
     def list_closing_issue_links(self, owner: str, name: str) -> list[tuple[int, int]]:
         return self._for(owner, name).list_closing_issue_links(owner, name)
+
+    def list_activity_since(
+        self, owner: str, name: str, *, since: datetime
+    ) -> list[ActivityRecord]:
+        return self._for(owner, name).list_activity_since(owner, name, since=since)
 
 
 class FakeSummarizer:
@@ -239,6 +265,54 @@ def make_review_request(pull_request_id: int, login: str) -> PRReviewRequest:
     return PRReviewRequest(pull_request_id=pull_request_id, login=login)
 
 
+def make_activity_record(kind: str, number: int, **overrides: object) -> ActivityRecord:
+    subject_type = "issue" if kind.startswith("issue_") else "pr"
+    noun = "issues" if subject_type == "issue" else "pull"
+    defaults: dict[str, object] = dict(
+        kind=kind,
+        subject_type=subject_type,
+        subject_number=number,
+        subject_title=f"Subject #{number}",
+        subject_html_url=f"https://github.com/octocat/hello-world/{noun}/{number}",
+        actor_login="alice",
+        occurred_at=RECENT_TIME,
+        detail=None,
+        review_id=None,
+    )
+    defaults.update(overrides)
+    return ActivityRecord(**defaults)  # type: ignore[arg-type]
+
+
+def make_activity_event(
+    kind: ActivityKind,
+    number: int,
+    *,
+    repository_id: int = 1296269,
+    detail_id: int | None = None,
+    **overrides: object,
+) -> ActivityEvent:
+    """Build a stored :class:`ActivityEvent` with a correct deterministic key.
+
+    For query tests that seed rows directly (rather than going through sync).
+    """
+    subject_type = "issue" if kind.value.startswith("issue_") else "pr"
+    noun = "issues" if subject_type == "issue" else "pull"
+    defaults: dict[str, object] = dict(
+        id=build_event_key(repository_id, subject_type, number, kind, detail_id),
+        kind=kind,
+        repository_id=repository_id,
+        actor_login="alice",
+        subject_type=subject_type,
+        subject_number=number,
+        subject_title=f"Subject #{number}",
+        subject_html_url=f"https://github.com/octocat/hello-world/{noun}/{number}",
+        occurred_at=FIXED_TIME,
+        detail=None,
+    )
+    defaults.update(overrides)
+    return ActivityEvent(**defaults)
+
+
 @pytest.fixture
 def client(engine: Engine) -> Iterator[TestClient]:
     """A ``TestClient`` whose DB session is bound to the in-memory ``engine``.
@@ -310,6 +384,11 @@ class _StubSettings:
     def __init__(self) -> None:
         self.repos: list[RepoRef] = []
         self.engineers: list[EngineerRef] = []
+        # The scrum schedule the what's-happened routes read. Default matches the team's real
+        # cadence, so a test gets a deterministic ``since`` without reading a real scrum.toml.
+        self.scrum: ScrumSchedule = ScrumSchedule(
+            days=["mon", "wed", "fri"], time="11:00", timezone="America/New_York"
+        )
         # AI-summary config the engineer routes read. Default: LLM not configured (no key),
         # so the "not configured" path is exercised unless a test installs a fake summarizer
         # (which overrides get_optional_summarizer directly, independent of this flag).
@@ -321,6 +400,9 @@ class _StubSettings:
 
     def load_engineers(self) -> list[EngineerRef]:
         return list(self.engineers)
+
+    def load_scrum(self) -> ScrumSchedule:
+        return self.scrum
 
     def __call__(self) -> "_StubSettings":
         # FastAPI resolves a dependency override by calling it; a stub instance returns
@@ -366,5 +448,20 @@ def use_engineers(client: TestClient) -> Callable[[list[EngineerRef]], None]:
 
     def _install(engineers: list[EngineerRef]) -> None:
         _stub_settings().engineers = list(engineers)
+
+    return _install
+
+
+@pytest.fixture
+def use_scrum(client: TestClient) -> Callable[[ScrumSchedule], None]:
+    """Return a helper that sets the scrum schedule for the client.
+
+    Overrides ``get_settings`` with a stub whose ``load_scrum`` yields the given schedule, so
+    the what's-happened routes compute a deterministic default ``since`` without reading a real
+    ``scrum.toml``. Composes with ``use_repos`` / ``use_engineers`` (same shared stub).
+    """
+
+    def _install(schedule: ScrumSchedule) -> None:
+        _stub_settings().scrum = schedule
 
     return _install

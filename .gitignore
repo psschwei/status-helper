@@ -7,6 +7,9 @@ repos.toml
 # Personal engineer roster for the Engineers view (copy from engineers.toml.example)
 engineers.toml
 
+# Personal scrum schedule (optional; copy from scrum.toml.example). Absent = built-in default.
+scrum.toml
+
 # Local database (cache of GitHub state — safe to delete and re-sync)
 *.db
 *.db-shm

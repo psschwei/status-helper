@@ -12,6 +12,7 @@ reviews, milestones, and body text are added in later slices when a feature need
 from __future__ import annotations
 
 from datetime import datetime
+from enum import StrEnum
 
 from sqlmodel import Field, SQLModel
 
@@ -133,3 +134,72 @@ class PRReviewRequest(SQLModel, table=True):
 
     pull_request_id: int = Field(foreign_key="pullrequest.id", primary_key=True, index=True)
     login: str = Field(primary_key=True)
+
+
+class ActivityKind(StrEnum):
+    """The kinds of activity captured in the append-only :class:`ActivityEvent` log.
+
+    ``PR_CLOSED`` means a pull request closed *without* being merged — a merged PR emits
+    ``PR_MERGED`` instead, never both, so a timeline reads cleanly. Values are the strings
+    stored in the database (``StrEnum`` serializes to its value in TEXT and JSON alike).
+    """
+
+    PR_OPENED = "pr_opened"
+    PR_MERGED = "pr_merged"
+    PR_CLOSED = "pr_closed"
+    ISSUE_OPENED = "issue_opened"
+    ISSUE_CLOSED = "issue_closed"
+    REVIEW_SUBMITTED = "review_submitted"
+
+
+class ActivityEvent(SQLModel, table=True):
+    """An append-only record of one GitHub activity event.
+
+    This is the one table sync **never deletes**. The PR / Issue snapshot tables are a
+    wholesale-replaced view of what is *currently open* (a merged PR vanishes from them); this
+    log is the durable history of what *happened*, which must survive after the underlying PR
+    or issue closes. That is why the subject's title / number / url are **denormalized onto the
+    event** rather than joined from ``PullRequest`` / ``Issue`` — those rows are gone once the
+    item closes, but the event must still render.
+
+    Events are not 1:1 with a GitHub numeric id (one PR yields both an "opened" and a "merged"
+    event; "PR opened" has no id of its own), so the primary key is a *deterministic string*
+    built by :func:`build_event_key`. Re-observing the same event yields the same key, making a
+    re-sync an idempotent ``session.merge`` upsert instead of a duplicate — the same reasoning
+    the composite keys on ``PullRequestIssueLink`` / ``IssueAssignee`` use, expressed as one
+    computed column.
+    """
+
+    id: str = Field(primary_key=True)  # deterministic key, see build_event_key
+    kind: ActivityKind = Field(index=True)
+    repository_id: int = Field(foreign_key="repository.id", index=True)
+    # Who performed the action (PR/issue author, or the reviewer). Nullable for the same
+    # deleted-"ghost"-account reason author_login is nullable elsewhere.
+    actor_login: str | None = Field(default=None, index=True)
+    subject_type: str  # "pr" | "issue"
+    subject_number: int
+    subject_title: str
+    subject_html_url: str
+    occurred_at: datetime = Field(index=True)  # when it happened (UTC); the query filters on it
+    # Review verdict ("approved" / "changes_requested" / "commented") for REVIEW_SUBMITTED;
+    # None for every other kind.
+    detail: str | None = None
+
+
+def build_event_key(
+    repository_id: int,
+    subject_type: str,
+    subject_number: int,
+    kind: ActivityKind,
+    detail_id: int | None = None,
+) -> str:
+    """Build the deterministic primary key for an :class:`ActivityEvent`.
+
+    The state-transition kinds occur at most once per subject, so
+    ``(repository_id, subject_type, subject_number, kind)`` is already unique for them and
+    ``detail_id`` stays ``None``. ``REVIEW_SUBMITTED`` is the exception: one reviewer can submit
+    many reviews on one PR, so the caller passes GitHub's review id as ``detail_id`` to keep
+    each review a distinct row — keying reviews on the actor would silently collapse them.
+    """
+    base = f"{repository_id}:{subject_type}:{subject_number}:{kind.value}"
+    return f"{base}:{detail_id}" if detail_id is not None else base

@@ -38,6 +38,10 @@ class _FakeRest:
         def list(**kwargs: Any) -> None:  # referenced by identity in paginate()
             ...
 
+        @staticmethod
+        def list_reviews(**kwargs: Any) -> None:  # referenced by identity in paginate()
+            ...
+
     class issues:
         @staticmethod
         def list_for_repo(**kwargs: Any) -> None:
@@ -171,6 +175,130 @@ def test_list_closing_issue_links_maps_pairs_and_drops_null(
     """closingIssuesReferences → (pr_id, issue_id) pairs, skipping null databaseIds."""
     links = connector.list_closing_issue_links("octocat", "hello-world")
     assert links == [(101, 201), (101, 202)]
+
+
+# --- Activity feed mapping --------------------------------------------------------
+#
+# A dedicated fake client so the activity fixtures (merge/close timestamps, an out-of-window
+# PR, per-PR reviews) don't perturb the open-snapshot tests above. SINCE sits between the
+# in-window items and the older one.
+
+SINCE = datetime(2026, 6, 1, 0, 0, tzinfo=UTC)
+BEFORE = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)  # older than SINCE
+AFTER = datetime(2026, 6, 10, 0, 0, tzinfo=UTC)  # newer than SINCE
+
+
+class _FakeActivityRest:
+    class repos:
+        @staticmethod
+        def get(owner: str, repo: str) -> None: ...
+
+    class pulls:
+        @staticmethod
+        def list(**kwargs: Any) -> None: ...
+
+        @staticmethod
+        def list_reviews(**kwargs: Any) -> None: ...
+
+    class issues:
+        @staticmethod
+        def list_for_repo(**kwargs: Any) -> None: ...
+
+
+class _FakeActivityGitHub:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.rest = _FakeActivityRest()
+
+    def paginate(self, request: Any, **kwargs: Any) -> list[SimpleNamespace]:
+        if request is self.rest.pulls.list:
+            # Sorted by updated_at desc, as the real endpoint is called. #10 merged in-window,
+            # #11 closed-unmerged in-window, #12 opened in-window, #13 is older than SINCE (the
+            # loop must break before mapping it).
+            return [
+                ns(id=10, number=10, title="Merged one", state="closed",
+                   user=ns(login="alice"), html_url="https://x/pull/10",
+                   created_at=BEFORE, updated_at=AFTER, merged_at=AFTER, closed_at=AFTER),
+                ns(id=11, number=11, title="Closed one", state="closed",
+                   user=ns(login="bob"), html_url="https://x/pull/11",
+                   created_at=BEFORE, updated_at=AFTER, merged_at=None, closed_at=AFTER),
+                ns(id=12, number=12, title="Opened one", state="open",
+                   user=ns(login="carol"), html_url="https://x/pull/12",
+                   created_at=AFTER, updated_at=AFTER, merged_at=None, closed_at=None),
+                ns(id=13, number=13, title="Ancient", state="closed",
+                   user=ns(login="dave"), html_url="https://x/pull/13",
+                   created_at=BEFORE, updated_at=BEFORE, merged_at=BEFORE, closed_at=BEFORE),
+            ]
+        if request is self.rest.pulls.list_reviews:
+            # Reviews for the in-window PR #10: one approval in-window, one older (excluded),
+            # one PENDING (null submitted_at, excluded).
+            if kwargs.get("pull_number") == 10:
+                return [
+                    ns(id=900, state="APPROVED", submitted_at=AFTER, user=ns(login="erin")),
+                    ns(id=901, state="COMMENTED", submitted_at=BEFORE, user=ns(login="frank")),
+                    ns(id=902, state="PENDING", submitted_at=None, user=ns(login="grace")),
+                ]
+            return []
+        if request is self.rest.issues.list_for_repo:
+            return [
+                # Opened in-window.
+                ns(id=200, number=20, title="New issue", state="open",
+                   user=ns(login="alice"), html_url="https://x/issues/20",
+                   created_at=AFTER, updated_at=AFTER, closed_at=None, pull_request=None),
+                # Closed in-window (opened before the window).
+                ns(id=201, number=21, title="Closed issue", state="closed",
+                   user=ns(login="bob"), html_url="https://x/issues/21",
+                   created_at=BEFORE, updated_at=AFTER, closed_at=AFTER, pull_request=None),
+                # A PR returned by the issues endpoint — must be skipped.
+                ns(id=10, number=10, title="Merged one", state="closed",
+                   user=ns(login="alice"), html_url="https://x/issues/10",
+                   created_at=BEFORE, updated_at=AFTER, closed_at=AFTER,
+                   pull_request=ns(url="https://x")),
+            ]
+        return []
+
+
+@pytest.fixture
+def activity_connector(monkeypatch: pytest.MonkeyPatch) -> GitHubKitConnector:
+    monkeypatch.setattr(
+        "status_assistant.connectors.github.GitHub", _FakeActivityGitHub
+    )
+    return GitHubKitConnector(base_url="https://api.github.com", token="tok")
+
+
+def test_list_activity_since_maps_pr_lifecycle(activity_connector: GitHubKitConnector) -> None:
+    records = activity_connector.list_activity_since("o", "n", since=SINCE)
+    by_kind = {(r.kind, r.subject_number) for r in records}
+    # #10 merged (not also closed), #11 closed-unmerged, #12 opened.
+    assert ("pr_merged", 10) in by_kind
+    assert ("pr_closed", 10) not in by_kind  # merged takes precedence over closed
+    assert ("pr_closed", 11) in by_kind
+    assert ("pr_opened", 12) in by_kind
+    # #13 is older than SINCE — the desc-sorted loop breaks before it.
+    assert all(r.subject_number != 13 for r in records)
+
+
+def test_list_activity_since_maps_issue_lifecycle(
+    activity_connector: GitHubKitConnector,
+) -> None:
+    records = activity_connector.list_activity_since("o", "n", since=SINCE)
+    by_kind = {(r.kind, r.subject_number) for r in records}
+    assert ("issue_opened", 20) in by_kind
+    assert ("issue_closed", 21) in by_kind
+    # The PR returned by the issues endpoint is not stored as an issue event.
+    assert ("issue_closed", 10) not in by_kind
+
+
+def test_list_activity_since_maps_reviews_and_skips_pending_and_old(
+    activity_connector: GitHubKitConnector,
+) -> None:
+    records = activity_connector.list_activity_since("o", "n", since=SINCE)
+    reviews = [r for r in records if r.kind == "review_submitted"]
+    # Only the in-window APPROVED review on PR #10 survives (old COMMENTED and PENDING dropped).
+    assert len(reviews) == 1
+    assert reviews[0].subject_number == 10
+    assert reviews[0].actor_login == "erin"
+    assert reviews[0].detail == "approved"
+    assert reviews[0].review_id == 900
 
 
 def test_enterprise_base_url_is_passed_to_client(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -11,7 +11,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from status_assistant.api.routes import engineers_router, reviews_router
+from status_assistant.api.routes import activity_router, engineers_router, reviews_router
 from status_assistant.api.routes import router as api_router
 from status_assistant.db import create_db_and_tables
 from status_assistant.web.views import router as web_router
@@ -31,6 +31,7 @@ def create_app() -> FastAPI:
     app.include_router(api_router)
     app.include_router(engineers_router)
     app.include_router(reviews_router)
+    app.include_router(activity_router)
     app.include_router(web_router)
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
     return app

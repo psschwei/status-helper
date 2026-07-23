@@ -12,8 +12,12 @@ from typing import Any
 
 from githubkit import GitHub
 
-from status_assistant.connectors.base import IssueWithAssignees, PullRequestWithReviewers
-from status_assistant.models import Issue, PullRequest, Repository
+from status_assistant.connectors.base import (
+    ActivityRecord,
+    IssueWithAssignees,
+    PullRequestWithReviewers,
+)
+from status_assistant.models import ActivityKind, Issue, PullRequest, Repository
 
 
 def _author_login(user: Any) -> str | None:
@@ -55,6 +59,34 @@ def _to_datetime(value: Any) -> datetime:
     if not isinstance(value, datetime):  # pragma: no cover - defensive
         raise TypeError(f"expected datetime, got {type(value)!r}")
     return value
+
+
+def _to_datetime_opt(value: Any) -> datetime | None:
+    """Nullable variant of :func:`_to_datetime`.
+
+    ``merged_at`` / ``closed_at`` / ``submitted_at`` are absent (``None`` or githubkit's
+    ``UNSET`` sentinel) for open PRs, un-closed issues, and pending reviews — all falsy here.
+    """
+    if not value:
+        return None
+    return _to_datetime(value)
+
+
+# GitHub review states are UPPERCASE; map the three we record to our lowercase verdicts.
+# PENDING (not yet submitted — null submitted_at) and DISMISSED are intentionally absent, so
+# _review_verdict returns None for them and the caller skips the review.
+_REVIEW_VERDICTS = {
+    "APPROVED": "approved",
+    "CHANGES_REQUESTED": "changes_requested",
+    "COMMENTED": "commented",
+}
+
+
+def _review_verdict(state: Any) -> str | None:
+    """Map a githubkit review ``state`` to our ``detail`` verdict, or ``None`` to skip it."""
+    if not isinstance(state, str):  # pragma: no cover - defensive
+        return None
+    return _REVIEW_VERDICTS.get(state.upper())
 
 
 class GitHubKitConnector:
@@ -196,3 +228,161 @@ class GitHubKitConnector:
                 break
             pr_cursor = page["endCursor"]
         return links
+
+    # --- Activity feed ------------------------------------------------------------
+
+    def list_activity_since(
+        self, owner: str, name: str, *, since: datetime
+    ) -> list[ActivityRecord]:
+        records: list[ActivityRecord] = []
+        # PRs whose reviews are worth fetching — collected while paging PRs so the (expensive)
+        # per-PR review calls are bounded to PRs updated within the window. A submitted review
+        # bumps its PR's updated_at, so any in-window review's PR is necessarily in this set.
+        in_window_prs: list[tuple[int, int, str, str]] = []  # (id, number, title, html_url)
+
+        records.extend(self._pr_activity(owner, name, since, in_window_prs))
+        records.extend(self._issue_activity(owner, name, since))
+        records.extend(self._review_activity(owner, name, since, in_window_prs))
+        return records
+
+    def _pr_activity(
+        self,
+        owner: str,
+        name: str,
+        since: datetime,
+        in_window_prs: list[tuple[int, int, str, str]],
+    ) -> list[ActivityRecord]:
+        """Opened / merged / closed events from PRs updated since ``since``.
+
+        ``pulls.list`` is sorted by ``updated_at`` descending, so once a PR predates the window
+        every remaining PR does too — we stop paginating there rather than walking all history.
+        """
+        records: list[ActivityRecord] = []
+        prs = self._paginate(
+            self._github.rest.pulls.list,
+            owner=owner,
+            repo=name,
+            state="all",
+            sort="updated",
+            direction="desc",
+        )
+        for pr in prs:
+            if _to_datetime(pr.updated_at) < since:
+                break  # sorted desc: everything after this is older than the window
+            in_window_prs.append((pr.id, pr.number, pr.title, pr.html_url))
+
+            created_at = _to_datetime(pr.created_at)
+            if created_at >= since:
+                records.append(
+                    self._pr_record(pr, ActivityKind.PR_OPENED, created_at)
+                )
+            merged_at = _to_datetime_opt(getattr(pr, "merged_at", None))
+            closed_at = _to_datetime_opt(getattr(pr, "closed_at", None))
+            if merged_at is not None and merged_at >= since:
+                # A merged PR is also "closed"; emit only PR_MERGED so it isn't double-counted.
+                records.append(self._pr_record(pr, ActivityKind.PR_MERGED, merged_at))
+            elif pr.state == "closed" and closed_at is not None and closed_at >= since:
+                records.append(self._pr_record(pr, ActivityKind.PR_CLOSED, closed_at))
+        return records
+
+    def _pr_record(
+        self, pr: Any, kind: ActivityKind, occurred_at: datetime
+    ) -> ActivityRecord:
+        return ActivityRecord(
+            kind=kind.value,
+            subject_type="pr",
+            subject_number=pr.number,
+            subject_title=pr.title,
+            subject_html_url=pr.html_url,
+            actor_login=_author_login(pr.user),
+            occurred_at=occurred_at,
+        )
+
+    def _issue_activity(
+        self, owner: str, name: str, since: datetime
+    ) -> list[ActivityRecord]:
+        """Opened / closed events from issues updated since ``since``.
+
+        The REST ``since`` parameter filters server-side by update time, so this fetches only
+        the recently-touched issues. PR-flavored items are skipped, as in :meth:`list_issues`.
+        """
+        records: list[ActivityRecord] = []
+        raw = self._paginate(
+            self._github.rest.issues.list_for_repo,
+            owner=owner,
+            repo=name,
+            state="all",
+            sort="updated",
+            direction="desc",
+            since=since,
+        )
+        for item in raw:
+            if getattr(item, "pull_request", None):
+                continue  # GitHub's issues endpoint also returns PRs; skip them
+            created_at = _to_datetime(item.created_at)
+            if created_at >= since:
+                records.append(
+                    self._issue_record(item, ActivityKind.ISSUE_OPENED, created_at)
+                )
+            closed_at = _to_datetime_opt(getattr(item, "closed_at", None))
+            if item.state == "closed" and closed_at is not None and closed_at >= since:
+                records.append(
+                    self._issue_record(item, ActivityKind.ISSUE_CLOSED, closed_at)
+                )
+        return records
+
+    def _issue_record(
+        self, item: Any, kind: ActivityKind, occurred_at: datetime
+    ) -> ActivityRecord:
+        return ActivityRecord(
+            kind=kind.value,
+            subject_type="issue",
+            subject_number=item.number,
+            subject_title=item.title,
+            subject_html_url=item.html_url,
+            actor_login=_author_login(item.user),
+            occurred_at=occurred_at,
+        )
+
+    def _review_activity(
+        self,
+        owner: str,
+        name: str,
+        since: datetime,
+        in_window_prs: list[tuple[int, int, str, str]],
+    ) -> list[ActivityRecord]:
+        """Submitted-review events, one ``pulls.list_reviews`` call per in-window PR.
+
+        This is the costliest source (a call per PR), which is why it runs only over the PRs
+        already found to be updated within the window — the only PRs that can carry an in-window
+        review. Pending reviews (null ``submitted_at``) and states we don't record are skipped.
+        """
+        records: list[ActivityRecord] = []
+        for _pr_id, number, title, html_url in in_window_prs:
+            reviews = self._paginate(
+                self._github.rest.pulls.list_reviews,
+                owner=owner,
+                repo=name,
+                pull_number=number,
+            )
+            for review in reviews:
+                submitted_at = _to_datetime_opt(getattr(review, "submitted_at", None))
+                if submitted_at is None or submitted_at < since:
+                    continue
+                verdict = _review_verdict(getattr(review, "state", None))
+                if verdict is None:
+                    continue  # PENDING / DISMISSED / unknown — not an event we record
+                records.append(
+                    ActivityRecord(
+                        kind=ActivityKind.REVIEW_SUBMITTED.value,
+                        subject_type="pr",
+                        subject_number=number,
+                        subject_title=title,
+                        subject_html_url=html_url,
+                        actor_login=_author_login(review.user),
+                        occurred_at=submitted_at,
+                        detail=verdict,
+                        review_id=review.id,
+                    )
+                )
+        return records

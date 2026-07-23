@@ -9,13 +9,16 @@ from datetime import timedelta
 
 from sqlmodel import Session
 
+from status_assistant.models import ActivityKind
 from status_assistant.queries import (
     get_engineer_view,
+    get_whats_happened,
     list_engineers,
     list_repositories,
 )
 from tests.conftest import (
     FIXED_TIME,
+    make_activity_event,
     make_issue,
     make_issue_assignee,
     make_link,
@@ -363,3 +366,86 @@ def test_get_engineer_view_orders_reviews_owed_by_updated_desc(session: Session)
 
     assert view is not None
     assert [r.pull_request.number for r in view.reviews_owed] == [2, 1]
+
+
+# --- get_whats_happened -----------------------------------------------------------
+
+
+def test_get_whats_happened_returns_events_after_since_newest_first(session: Session) -> None:
+    session.add(make_repository())
+    # Three events at distinct times; `since` sits between the oldest and the middle one.
+    session.add(make_activity_event(ActivityKind.PR_OPENED, 1, occurred_at=FIXED_TIME))
+    session.add(
+        make_activity_event(
+            ActivityKind.PR_MERGED, 2, occurred_at=FIXED_TIME + timedelta(hours=2)
+        )
+    )
+    session.add(
+        make_activity_event(
+            ActivityKind.ISSUE_CLOSED, 3, occurred_at=FIXED_TIME + timedelta(hours=1)
+        )
+    )
+    session.commit()
+
+    view = get_whats_happened(session, FIXED_TIME + timedelta(minutes=30))
+
+    # The event exactly at/before `since` (PR #1) is excluded (`>`); the rest come newest-first.
+    assert [item.event.subject_number for item in view.events] == [2, 3]
+    assert view.since == FIXED_TIME + timedelta(minutes=30)
+    # The repository rides along, joined without a per-event query.
+    assert view.events[0].repository.full_name == "octocat/hello-world"
+
+
+def test_get_whats_happened_boundary_is_exclusive(session: Session) -> None:
+    session.add(make_repository())
+    session.add(make_activity_event(ActivityKind.PR_MERGED, 1, occurred_at=FIXED_TIME))
+    session.commit()
+
+    # An event exactly at `since` is not "since the scrum" — excluded.
+    assert get_whats_happened(session, FIXED_TIME).events == []
+    # A hair before, it's included.
+    assert len(get_whats_happened(session, FIXED_TIME - timedelta(seconds=1)).events) == 1
+
+
+def test_get_whats_happened_respects_roster(session: Session) -> None:
+    session.add(make_repository())
+    session.add(make_activity_event(ActivityKind.PR_OPENED, 1, actor_login="alice"))
+    session.add(make_activity_event(ActivityKind.PR_OPENED, 2, actor_login="bob"))
+    # A null-actor event (e.g. a ghost account) — dropped under any roster filter.
+    session.add(make_activity_event(ActivityKind.ISSUE_CLOSED, 3, actor_login=None))
+    session.commit()
+
+    since = FIXED_TIME - timedelta(hours=1)
+    # With a roster, only alice's event survives.
+    filtered = get_whats_happened(session, since, allowed_logins={"alice"})
+    assert [item.event.subject_number for item in filtered.events] == [1]
+    # With no roster (None), everyone including the null-actor event is shown.
+    unfiltered = get_whats_happened(session, since, allowed_logins=None)
+    assert {item.event.subject_number for item in unfiltered.events} == {1, 2, 3}
+
+
+def test_get_whats_happened_empty(session: Session) -> None:
+    view = get_whats_happened(session, FIXED_TIME)
+    assert view.events == []
+    assert view.since == FIXED_TIME
+
+
+def test_activity_event_item_action_phrase(session: Session) -> None:
+    session.add(make_repository())
+    session.add(
+        make_activity_event(
+            ActivityKind.REVIEW_SUBMITTED, 42, detail="approved", detail_id=7,
+            occurred_at=FIXED_TIME + timedelta(hours=1),
+        )
+    )
+    session.add(
+        make_activity_event(
+            ActivityKind.PR_MERGED, 9, occurred_at=FIXED_TIME + timedelta(hours=2)
+        )
+    )
+    session.commit()
+
+    view = get_whats_happened(session, FIXED_TIME)
+    phrases = {item.event.subject_number: item.action_phrase for item in view.events}
+    assert phrases[42] == "approved PR #42"
+    assert phrases[9] == "merged PR #9"

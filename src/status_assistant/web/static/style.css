@@ -131,6 +131,26 @@ tbody tr:last-child td { border-bottom: none; }
 
 .empty-list { color: var(--muted); margin: 0; font-size: 0.9rem; }
 
+/* The "since" override on the what's-happened view: a label, a datetime box, and Update. */
+.since-form {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+.since-form label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+}
+.since-form input {
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font: inherit;
+}
+
 .empty h1 { margin-bottom: 0.5rem; }
 .hint { color: var(--muted); font-size: 0.9rem; }
 

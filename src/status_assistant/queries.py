@@ -7,10 +7,13 @@ arrive, this is where their queries live.
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 
 from sqlmodel import Session, col, func, select
 
 from status_assistant.models import (
+    ActivityEvent,
+    ActivityKind,
     EngineerSummary,
     Issue,
     IssueAssignee,
@@ -541,3 +544,97 @@ def get_engineer_summary(session: Session, login: str) -> EngineerSummary | None
     AI service, keeping this module read-only.
     """
     return session.get(EngineerSummary, login)
+
+
+# The verb shown for each activity kind, e.g. "merged PR #42". Reviews get their verb from the
+# verdict in ``ActivityEvent.detail`` instead (see ``action_phrase``).
+_ACTIVITY_VERBS = {
+    ActivityKind.PR_OPENED: "opened",
+    ActivityKind.PR_MERGED: "merged",
+    ActivityKind.PR_CLOSED: "closed",
+    ActivityKind.ISSUE_OPENED: "opened",
+    ActivityKind.ISSUE_CLOSED: "closed",
+}
+
+_REVIEW_VERBS = {
+    "approved": "approved",
+    "changes_requested": "requested changes on",
+    "commented": "commented on",
+}
+
+
+@dataclass(frozen=True)
+class ActivityEventItem:
+    """One activity event with the repository it happened in.
+
+    The ``repository`` rides along so the template can link and label without a second lookup —
+    the same convention as :class:`ReviewItem`. Rendering strings are precomputed here as
+    properties so the template stays thin.
+    """
+
+    event: ActivityEvent
+    repository: Repository
+
+    @property
+    def subject_label(self) -> str:
+        """e.g. "PR #42" / "issue #7"."""
+        noun = "PR" if self.event.subject_type == "pr" else "issue"
+        return f"{noun} #{self.event.subject_number}"
+
+    @property
+    def action_phrase(self) -> str:
+        """A human verb phrase for the event, e.g. "merged PR #42" / "approved PR #7"."""
+        if self.event.kind is ActivityKind.REVIEW_SUBMITTED:
+            verb = _REVIEW_VERBS.get(self.event.detail or "", "reviewed")
+        else:
+            verb = _ACTIVITY_VERBS.get(self.event.kind, str(self.event.kind))
+        return f"{verb} {self.subject_label}"
+
+
+@dataclass(frozen=True)
+class WhatsHappenedView:
+    """Everything the "what's happened since last scrum?" view needs: the effective ``since``
+    bound (so the page can echo it and pre-fill the override box) and the matching events.
+    """
+
+    since: datetime
+    events: list[ActivityEventItem]
+
+
+def get_whats_happened(
+    session: Session,
+    since: datetime,
+    allowed_logins: set[str] | None = None,
+) -> WhatsHappenedView:
+    """Return every activity event after ``since``, newest first, each with its repository.
+
+    A flat reverse-chronological timeline — the simplest faithful rendering of "what happened."
+    ``since`` is exclusive (``>``), so the scrum instant itself isn't counted as "since the
+    scrum." When ``allowed_logins`` is given, only events whose ``actor_login`` is in the roster
+    are returned (an event with a null / unknown actor is dropped under the filter) — the same
+    roster convention as :func:`list_engineers` / :func:`list_reviewers`. Repositories are
+    fetched in one query and joined in Python (fixed query count), like the helpers above.
+    """
+    statement = (
+        select(ActivityEvent)
+        .where(col(ActivityEvent.occurred_at) > since)
+        .order_by(col(ActivityEvent.occurred_at).desc())
+    )
+    if allowed_logins is not None:
+        statement = statement.where(col(ActivityEvent.actor_login).in_(allowed_logins))
+    events = list(session.exec(statement).all())
+
+    repo_ids = {event.repository_id for event in events}
+    repositories = {
+        repo.id: repo
+        for repo in session.exec(
+            select(Repository).where(col(Repository.id).in_(repo_ids))
+        ).all()
+    }
+
+    items = [
+        ActivityEventItem(event=event, repository=repositories[event.repository_id])
+        for event in events
+        if event.repository_id in repositories
+    ]
+    return WhatsHappenedView(since=since, events=items)
