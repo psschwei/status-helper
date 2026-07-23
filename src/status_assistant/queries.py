@@ -697,6 +697,9 @@ def get_whats_happened(
     events whose ``actor_login`` is in the roster are returned (null-actor events drop under the
     filter) — the same roster convention as :func:`list_engineers` / :func:`list_reviewers`.
     Repositories are fetched in one query and joined in Python (fixed query count).
+
+    Self-reviews are excluded: a ``REVIEW_SUBMITTED`` event whose actor is the PR's own author
+    (bob reviewing bob's PR) is dropped, since it isn't review work worth reporting.
     """
     statement = (
         select(ActivityEvent)
@@ -706,6 +709,35 @@ def get_whats_happened(
     if allowed_logins is not None:
         statement = statement.where(col(ActivityEvent.actor_login).in_(allowed_logins))
     events = list(session.exec(statement).all())
+
+    # Self-reviews (someone reviewing their own PR) shouldn't count as review activity. The
+    # review event doesn't carry the PR's author, but the ``PR_OPENED`` event for the same
+    # subject does (its ``actor_login`` is the author) — and that event persists in the log
+    # even after the PR merges/closes, so it's the durable source. Look those up across all
+    # time (not just the window: an in-window review can be on a PR opened earlier), keyed by
+    # ``(repository_id, subject_number)``. A PR opened before the retention cutoff has no
+    # ``PR_OPENED`` event, so its author is unknown and the review is kept (can't prove self).
+    review_subjects = {
+        (e.repository_id, e.subject_number)
+        for e in events
+        if e.kind == ActivityKind.REVIEW_SUBMITTED
+    }
+    pr_authors: dict[tuple[int, int], str | None] = {}
+    if review_subjects:
+        for opened in session.exec(
+            select(ActivityEvent).where(
+                col(ActivityEvent.kind) == ActivityKind.PR_OPENED
+            )
+        ).all():
+            key = (opened.repository_id, opened.subject_number)
+            if key in review_subjects:
+                pr_authors[key] = opened.actor_login
+
+    def _is_self_review(event: ActivityEvent) -> bool:
+        if event.kind != ActivityKind.REVIEW_SUBMITTED:
+            return False
+        author = pr_authors.get((event.repository_id, event.subject_number))
+        return author is not None and author == event.actor_login
 
     repo_ids = {event.repository_id for event in events}
     repositories = {
@@ -721,6 +753,8 @@ def get_whats_happened(
     for event in events:
         if event.repository_id not in repositories:
             continue  # defensive: skip an event whose repo somehow isn't cached
+        if _is_self_review(event):
+            continue  # bob reviewing bob's own PR isn't review activity worth reporting
         item = ActivityEventItem(event=event, repository=repositories[event.repository_id])
         by_login.setdefault(event.actor_login, []).append(item)
 

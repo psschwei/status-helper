@@ -409,6 +409,46 @@ def test_get_whats_happened_splits_prs_reviews_issues(session: Session) -> None:
     assert alice.action_count == 4
 
 
+def test_get_whats_happened_excludes_self_reviews(session: Session) -> None:
+    """bob reviewing bob's own PR isn't counted; bob reviewing alice's PR is."""
+    session.add(make_repository())
+    # PR #1 opened by bob, then reviewed by bob — a self-review, dropped.
+    session.add(make_activity_event(ActivityKind.PR_OPENED, 1, actor_login="bob"))
+    session.add(
+        make_activity_event(
+            ActivityKind.REVIEW_SUBMITTED, 1, detail="approved", detail_id=1, actor_login="bob"
+        )
+    )
+    # PR #2 opened by alice, reviewed by bob — a real review, kept.
+    session.add(make_activity_event(ActivityKind.PR_OPENED, 2, actor_login="alice"))
+    session.add(
+        make_activity_event(
+            ActivityKind.REVIEW_SUBMITTED, 2, detail="approved", detail_id=2, actor_login="bob"
+        )
+    )
+    session.commit()
+
+    view = get_whats_happened(session, FIXED_TIME - timedelta(hours=1))
+    engineers = {eng.login: eng for eng in view.engineers}
+    # bob's only review (on his own PR) is dropped, so he has no review rows.
+    assert [a.action_phrase for a in engineers["bob"].reviews] == ["reviewed PR #2"]
+
+
+def test_get_whats_happened_keeps_review_when_pr_author_unknown(session: Session) -> None:
+    """A review whose PR was opened before the retention window (no PR_OPENED event) is kept —
+    self-ness can't be proven, so it isn't silently dropped."""
+    session.add(make_repository())
+    session.add(
+        make_activity_event(
+            ActivityKind.REVIEW_SUBMITTED, 9, detail="approved", detail_id=1, actor_login="bob"
+        )
+    )
+    session.commit()
+
+    (bob,) = get_whats_happened(session, FIXED_TIME - timedelta(hours=1)).engineers
+    assert [a.action_phrase for a in bob.reviews] == ["reviewed PR #9"]
+
+
 def test_get_whats_happened_dedupes_repeated_action_on_same_subject(session: Session) -> None:
     """Several reviews on the same PR (mixed verdicts) collapse to one "reviewed" row."""
     session.add(make_repository())
