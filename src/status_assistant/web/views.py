@@ -249,8 +249,10 @@ def whats_happened_export(
 
     Reuses the same query, ``since`` resolution, and engineer-roster filter as the page above, so
     the export matches exactly what the user sees — one row per deduped :class:`AggregatedActivity`,
-    with the engineer, section, date, action, subject, URL, repository, and count. The filename
-    embeds the effective ``since`` date so multiple exports don't collide.
+    with the engineer, section, date, action, subject, URL, repository, and count. A merged PR's
+    nested closed-issues are flattened onto their own ``Issues (linked)`` rows whose ``linked_pr``
+    column names the parent PR, so the tree is preserved losslessly. The filename embeds the
+    effective ``since`` date so multiple exports don't collide.
     """
     schedule = settings.load_scrum()
     effective_since = _parse_since_web(since, schedule) or last_scrum_before(
@@ -262,7 +264,8 @@ def whats_happened_export(
     buffer = io.StringIO()
     writer = csv.writer(buffer)
     writer.writerow(
-        ["engineer", "section", "date", "action", "subject", "url", "repository", "count"]
+        ["engineer", "section", "date", "action", "subject", "url", "repository", "count",
+         "linked_pr"]
     )
     for eng in view.engineers:
         login = eng.login or "unknown"
@@ -278,8 +281,25 @@ def whats_happened_export(
                         act.subject_html_url,
                         act.repository.full_name,
                         act.count,
+                        "",  # top-level row: not nested under a PR
                     ]
                 )
+                # Flatten a merged PR's nested closed-issues onto their own rows, tying each back
+                # to the parent via the ``linked_pr`` column so the export stays lossless.
+                for child in act.children:
+                    writer.writerow(
+                        [
+                            login,
+                            "Issues (linked)",
+                            _format_date(child.latest),
+                            child.action_phrase,
+                            child.subject_title,
+                            child.subject_html_url,
+                            child.repository.full_name,
+                            child.count,
+                            act.action_phrase,  # e.g. "merged PR #42"
+                        ]
+                    )
 
     buffer.seek(0)
     filename = f"scrum-{effective_since.strftime('%Y-%m-%d')}.csv"

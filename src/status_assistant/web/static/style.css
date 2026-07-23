@@ -125,6 +125,10 @@ tbody tr:last-child td { border-bottom: none; }
 .activity-group:first-of-type { margin-top: 0.25rem; }
 .when { color: var(--muted); font-size: 0.85rem; white-space: nowrap; width: 10rem; }
 
+/* Issues closed by a merged PR, nested under its row. */
+.nested-issues { margin: 0.25rem 0 0; padding: 0; list-style: none; }
+.nested-issue { color: var(--muted); font-size: 0.9rem; padding-left: 0.5rem; }
+
 .badge {
   display: inline-block;
   font-size: 0.7rem;

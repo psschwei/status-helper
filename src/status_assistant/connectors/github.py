@@ -61,6 +61,15 @@ def _to_datetime(value: Any) -> datetime:
     return value
 
 
+def _parse_iso(value: str) -> datetime:
+    """Parse a GraphQL ISO-8601 timestamp (e.g. ``2026-06-10T00:00:00Z``) to a ``datetime``.
+
+    Unlike the REST client, ``graphql`` returns raw JSON, so timestamps arrive as strings.
+    ``fromisoformat`` accepts the trailing ``Z`` on Python 3.11+.
+    """
+    return datetime.fromisoformat(value)
+
+
 def _to_datetime_opt(value: Any) -> datetime | None:
     """Nullable variant of :func:`_to_datetime`.
 
@@ -230,25 +239,59 @@ class GitHubKitConnector:
             pr_cursor = page["endCursor"]
         return links
 
+    # Closing links keyed by *number*, for the durable scrum-view dedup. Unlike the id-keyed
+    # query above (scoped to OPEN because it only feeds the open-issue ``PullRequestIssueLink``),
+    # this must catch links on PRs that have already *merged* — that's the whole point, so the
+    # link outlives the merge. So it walks PRs of ALL states ordered by ``UPDATED_AT`` desc, and
+    # the caller stops paging once a PR predates the activity window (mirroring ``_pr_activity``).
+    _CLOSING_NUMBER_LINKS_QUERY = """
+    query($owner: String!, $name: String!, $prCursor: String) {
+      repository(owner: $owner, name: $name) {
+        pullRequests(
+          first: 50, after: $prCursor,
+          orderBy: {field: UPDATED_AT, direction: DESC}
+        ) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            number
+            updatedAt
+            closingIssuesReferences(first: 50) {
+              nodes { number }
+            }
+          }
+        }
+      }
+    }
+    """
+
     def list_closing_issue_number_links(
-        self, owner: str, name: str
+        self, owner: str, name: str, *, since: datetime
     ) -> list[tuple[int, int]]:
-        """Same closing links as :meth:`list_closing_issue_links`, keyed by *number* not id.
+        """Closing PR→issue links keyed by *number*, for PRs updated at/after ``since``.
 
         Returns ``(pr_number, issue_number)`` pairs. The scrum view's dedup joins these against
-        the activity log's ``subject_number``, which the database-id form can't reach once the
-        PR/issue snapshot rows (the only id→number mapping) are gone. Reuses the same paginated
-        query; a node missing its ``number`` is skipped.
+        the activity log's ``subject_number``, which the id-keyed form can't reach once the
+        PR/issue snapshot rows (the only id→number mapping) are gone.
+
+        Walks PRs across *all* states newest-first by ``updatedAt`` so a link on a recently
+        *merged* PR is captured — the id-keyed :meth:`list_closing_issue_links` (OPEN only)
+        would miss it, leaving a merged PR and the issue it closed both showing in a scrum. Stops
+        paging once a PR predates ``since``, the same early-break ``_pr_activity`` uses. A node
+        missing its ``number`` is skipped.
         """
         links: list[tuple[int, int]] = []
         pr_cursor: str | None = None
         while True:
             data = self._github.graphql(
-                self._CLOSING_LINKS_QUERY,
+                self._CLOSING_NUMBER_LINKS_QUERY,
                 {"owner": owner, "name": name, "prCursor": pr_cursor},
             )
             connection = data["repository"]["pullRequests"]
+            stop = False
             for pr in connection["nodes"]:
+                if _parse_iso(pr["updatedAt"]) < since:
+                    stop = True  # sorted desc: this and all later PRs are outside the window
+                    break
                 pr_number = pr.get("number")
                 if pr_number is None:
                     continue
@@ -257,7 +300,7 @@ class GitHubKitConnector:
                     if issue_number is not None:
                         links.append((pr_number, issue_number))
             page = connection["pageInfo"]
-            if not page["hasNextPage"]:
+            if stop or not page["hasNextPage"]:
                 break
             pr_cursor = page["endCursor"]
         return links

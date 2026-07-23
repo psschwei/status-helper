@@ -110,14 +110,15 @@ class GitHubConnector(Protocol):
         ...
 
     def list_closing_issue_number_links(
-        self, owner: str, name: str
+        self, owner: str, name: str, *, since: datetime
     ) -> list[tuple[int, int]]:
-        """Same closing links as :meth:`list_closing_issue_links`, keyed by *number* not id.
+        """Closing links keyed by *number* not id, for PRs updated at/after ``since``.
 
         Each pair is ``(pr_number, issue_number)`` — the ``#42``-style numbers, matching
         ``ActivityEvent.subject_number``. The scrum view stores these durably so it can dedupe a
         merged PR against the issue it closed after both have left the open snapshot (where the
-        id→number mapping lived). Same source and unfiltered semantics as the id-keyed variant.
+        id→number mapping lived). Unlike the id-keyed variant this spans PRs of *all* states
+        (bounded by ``since``) so a link on an already-merged PR is still captured.
         """
         ...
 

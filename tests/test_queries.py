@@ -494,10 +494,9 @@ def test_get_whats_happened_keeps_distinct_phrases_on_same_subject(session: Sess
     assert all(a.count == 1 for a in alice.prs)
 
 
-def test_get_whats_happened_drops_merged_pr_that_closed_in_window_issue(
-    session: Session,
-) -> None:
-    """Merged PR #42 closed issue #7 (both in-window, linked) → keep the issue, drop the PR."""
+def test_get_whats_happened_nests_closed_issue_under_merged_pr(session: Session) -> None:
+    """Merged PR #42 closed issue #7 (both in-window, linked) → one PR row with the issue as a
+    child; no standalone issue row; the child doesn't inflate action_count."""
     session.add(make_repository())
     session.add(
         make_activity_event(ActivityKind.PR_MERGED, 42, occurred_at=FIXED_TIME + timedelta(hours=1))
@@ -512,12 +511,15 @@ def test_get_whats_happened_drops_merged_pr_that_closed_in_window_issue(
 
     view = get_whats_happened(session, FIXED_TIME - timedelta(hours=1))
     (alice,) = view.engineers
-    assert alice.prs == []  # the merged-PR row is suppressed
-    assert [a.action_phrase for a in alice.issues] == ["closed issue #7"]
+    (pr_row,) = alice.prs
+    assert pr_row.action_phrase == "merged PR #42"
+    assert [c.action_phrase for c in pr_row.children] == ["closed issue #7"]
+    assert alice.issues == []  # the issue is nested, not shown standalone
+    assert alice.action_count == 1  # one unit of work; the child doesn't count
 
 
-def test_get_whats_happened_keeps_merged_pr_without_link(session: Session) -> None:
-    """No ClosingIssueLink → the PR and issue are unrelated, so both rows stay."""
+def test_get_whats_happened_no_nesting_without_link(session: Session) -> None:
+    """No ClosingIssueLink → the PR and issue are unrelated, so both stand alone, no children."""
     session.add(make_repository())
     session.add(
         make_activity_event(ActivityKind.PR_MERGED, 42, occurred_at=FIXED_TIME + timedelta(hours=1))
@@ -531,23 +533,25 @@ def test_get_whats_happened_keeps_merged_pr_without_link(session: Session) -> No
 
     view = get_whats_happened(session, FIXED_TIME - timedelta(hours=1))
     (alice,) = view.engineers
-    assert [a.action_phrase for a in alice.prs] == ["merged PR #42"]
+    (pr_row,) = alice.prs
+    assert pr_row.action_phrase == "merged PR #42"
+    assert pr_row.children == ()
     assert [a.action_phrase for a in alice.issues] == ["closed issue #7"]
 
 
-def test_get_whats_happened_keeps_merged_pr_when_issue_closed_out_of_window(
+def test_get_whats_happened_no_nesting_when_pr_merged_out_of_window(
     session: Session,
 ) -> None:
-    """Linked, but the ISSUE_CLOSED is before the window → the merged PR is the only in-window
-    signal, so it must stay."""
+    """Linked, but the PR merged before the window (only the issue-close is in-window) → no PR
+    row to nest under, so the issue stays standalone."""
     session.add(make_repository())
+    # PR merged an hour before the window opens — not returned by the query.
     session.add(
-        make_activity_event(ActivityKind.PR_MERGED, 42, occurred_at=FIXED_TIME + timedelta(hours=1))
+        make_activity_event(ActivityKind.PR_MERGED, 42, occurred_at=FIXED_TIME - timedelta(hours=2))
     )
-    # Issue closed an hour before the scrum window opens — not returned by the query.
     session.add(
         make_activity_event(
-            ActivityKind.ISSUE_CLOSED, 7, occurred_at=FIXED_TIME - timedelta(hours=2)
+            ActivityKind.ISSUE_CLOSED, 7, occurred_at=FIXED_TIME + timedelta(hours=1)
         )
     )
     session.add(make_closing_issue_link(42, 7))
@@ -555,12 +559,13 @@ def test_get_whats_happened_keeps_merged_pr_when_issue_closed_out_of_window(
 
     view = get_whats_happened(session, FIXED_TIME - timedelta(hours=1))
     (alice,) = view.engineers
-    assert [a.action_phrase for a in alice.prs] == ["merged PR #42"]
-    assert alice.issues == []  # out-of-window issue-close isn't reported either
+    assert alice.prs == []  # out-of-window merge isn't reported
+    assert [a.action_phrase for a in alice.issues] == ["closed issue #7"]
 
 
-def test_get_whats_happened_suppression_is_cross_actor(session: Session) -> None:
-    """bob's PR #42 closed alice's issue #7 → bob's PR row drops, alice's issue row stays."""
+def test_get_whats_happened_nesting_is_cross_actor(session: Session) -> None:
+    """bob's PR #42 closed alice's issue #7 → the issue nests under bob's PR row and alice's
+    standalone issue row is removed (alice drops out if it was her only activity)."""
     session.add(make_repository())
     session.add(
         make_activity_event(
@@ -579,14 +584,43 @@ def test_get_whats_happened_suppression_is_cross_actor(session: Session) -> None
 
     view = get_whats_happened(session, FIXED_TIME - timedelta(hours=1))
     engineers = {e.login: e for e in view.engineers}
-    # bob's only activity was the suppressed merged-PR, so bob drops out entirely; alice keeps
-    # the issue-closed row. Confirms suppression is by PR author, not the issue closer.
-    assert "bob" not in engineers
-    assert [a.action_phrase for a in engineers["alice"].issues] == ["closed issue #7"]
+    # The issue nests under bob's PR; alice's only activity was that close, so she drops out.
+    assert "alice" not in engineers
+    (pr_row,) = engineers["bob"].prs
+    assert pr_row.action_phrase == "merged PR #42"
+    assert [c.action_phrase for c in pr_row.children] == ["closed issue #7"]
 
 
-def test_get_whats_happened_never_suppresses_pr_opened(session: Session) -> None:
-    """Only PR_MERGED is deduped; PR_OPENED on the same linked PR is always kept."""
+def test_get_whats_happened_nests_multiple_issues_under_one_pr(session: Session) -> None:
+    """One PR that closed two issues → both appear as children of the single PR row."""
+    session.add(make_repository())
+    session.add(
+        make_activity_event(ActivityKind.PR_MERGED, 42, occurred_at=FIXED_TIME + timedelta(hours=1))
+    )
+    session.add(
+        make_activity_event(
+            ActivityKind.ISSUE_CLOSED, 7, occurred_at=FIXED_TIME + timedelta(hours=2)
+        )
+    )
+    session.add(
+        make_activity_event(
+            ActivityKind.ISSUE_CLOSED, 8, occurred_at=FIXED_TIME + timedelta(hours=3)
+        )
+    )
+    session.add(make_closing_issue_link(42, 7))
+    session.add(make_closing_issue_link(42, 8))
+    session.commit()
+
+    view = get_whats_happened(session, FIXED_TIME - timedelta(hours=1))
+    (alice,) = view.engineers
+    (pr_row,) = alice.prs
+    # Children newest-first, like top-level rows.
+    assert [c.action_phrase for c in pr_row.children] == ["closed issue #8", "closed issue #7"]
+    assert alice.issues == []
+
+
+def test_get_whats_happened_pr_opened_never_gets_children(session: Session) -> None:
+    """"opened PR #42" and "merged PR #42" share a URL; only the merged row gets the children."""
     session.add(make_repository())
     session.add(
         make_activity_event(ActivityKind.PR_OPENED, 42, occurred_at=FIXED_TIME + timedelta(hours=1))
@@ -604,9 +638,10 @@ def test_get_whats_happened_never_suppresses_pr_opened(session: Session) -> None
 
     view = get_whats_happened(session, FIXED_TIME - timedelta(hours=1))
     (alice,) = view.engineers
-    # The merged row is gone; opened stays.
-    assert [a.action_phrase for a in alice.prs] == ["opened PR #42"]
-    assert [a.action_phrase for a in alice.issues] == ["closed issue #7"]
+    by_phrase = {a.action_phrase: a for a in alice.prs}
+    assert [c.action_phrase for c in by_phrase["merged PR #42"].children] == ["closed issue #7"]
+    assert by_phrase["opened PR #42"].children == ()  # opened row must stay childless
+    assert alice.issues == []
 
 
 def test_get_whats_happened_rows_within_section_are_newest_first(session: Session) -> None:

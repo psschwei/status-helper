@@ -612,6 +612,11 @@ class AggregatedActivity:
     the view sorts and displays by it (as a date). ``group`` is the section ("prs" / "reviews" /
     "issues") the row belongs under. The subject/repository fields are lifted off the
     representative event so the template can link and label without touching the raw events.
+
+    ``children`` holds nested rows shown indented under this one. It is populated only for a
+    merged-PR row, with the "closed issue #N" rows for the issues that PR closed (see
+    :func:`get_whats_happened`) — so a merged PR and the issue it closed read as one unit of work
+    instead of two rows. Children don't count toward the engineer's ``action_count``.
     """
 
     group: str
@@ -621,6 +626,7 @@ class AggregatedActivity:
     repository: Repository
     count: int
     latest: datetime
+    children: tuple["AggregatedActivity", ...] = ()
 
 
 @dataclass(frozen=True)
@@ -702,9 +708,11 @@ def get_whats_happened(
     Self-reviews are excluded: a ``REVIEW_SUBMITTED`` event whose actor is the PR's own author
     (bob reviewing bob's PR) is dropped, since it isn't review work worth reporting.
 
-    Merged-PR/closed-issue pairs are collapsed to one row: when a merged PR closed a linked
-    issue (per a durable :class:`ClosingIssueLink`) and that issue's ``ISSUE_CLOSED`` is in the
-    same window, the ``PR_MERGED`` row is dropped and the issue row kept.
+    Merged-PR/closed-issue pairs are collapsed into one nested row: when a merged PR closed a
+    linked issue (per a durable :class:`ClosingIssueLink`) and both the ``PR_MERGED`` and the
+    ``ISSUE_CLOSED`` are in this window, the issue is rendered as a child of the PR row (via
+    ``AggregatedActivity.children``) and its standalone row is dropped — including from a
+    different engineer's Issues section when the PR author and issue closer differ.
     """
     statement = (
         select(ActivityEvent)
@@ -745,36 +753,44 @@ def get_whats_happened(
         return author is not None and author == event.actor_login
 
     # A merged PR that closed a linked issue would otherwise show twice: once as "merged PR #42"
-    # and once as "closed issue #7". We keep the issue row and drop the PR_MERGED row. Build the
-    # set of ``(repository_id, pr_number)`` to suppress: a PR is suppressed only when it has a
-    # durable ``ClosingIssueLink`` to an issue whose ``ISSUE_CLOSED`` event is *in this window*
-    # (an issue closed outside the window leaves the merged PR as the only in-window signal, so
-    # the PR must stay). The link is number-keyed precisely so it joins the event log after both
-    # the PR and issue have left the open snapshot. Note the PR author and issue closer can
-    # differ — suppressing the PR row removes it from the *PR author's* section while the *issue
-    # closer* still shows the issue-closed row, which is the intended single entry.
-    closed_issues_in_window = {
-        (e.repository_id, e.subject_number)
+    # and once as "closed issue #7". Instead we render the PR as the headline row and *nest* the
+    # issue(s) it closed underneath it, so the pair reads as one unit of work. Using the durable,
+    # number-keyed ``ClosingIssueLink``, pair each in-window ``PR_MERGED`` with the in-window
+    # ``ISSUE_CLOSED`` events for the issues it closed. Both endpoints must be in this window: a
+    # PR merged outside the window has no row to nest under, so its issue-close stays standalone.
+    #
+    # The nested issue-close event is dropped from wherever it would otherwise show — including a
+    # *different* engineer's Issues section when the PR author and issue closer differ (bob's PR
+    # closing alice's issue nests under bob, and alice's standalone row is removed). So the
+    # pairing is computed globally here, before per-engineer bucketing.
+    # Merged PRs in-window, mapped to their URL so children can be matched onto the merged-PR
+    # ``AggregatedActivity`` (which carries ``subject_html_url``) below.
+    pr_urls_by_number = {
+        (e.repository_id, e.subject_number): e.subject_html_url
+        for e in events
+        if e.kind == ActivityKind.PR_MERGED
+    }
+    closed_issue_events = {
+        (e.repository_id, e.subject_number): e
         for e in events
         if e.kind == ActivityKind.ISSUE_CLOSED
     }
-    suppressed_prs: set[tuple[int, int]] = set()
-    if closed_issues_in_window:
-        repo_ids_with_close = {rid for rid, _ in closed_issues_in_window}
+    # (repository_id, pr_number) -> the ISSUE_CLOSED events nested under that merged PR.
+    pr_to_closed_issues: dict[tuple[int, int], list[ActivityEvent]] = {}
+    nested_issue_event_ids: set[str] = set()
+    if pr_urls_by_number and closed_issue_events:
+        repos_in_play = {rid for rid, _ in pr_urls_by_number}
         for link in session.exec(
             select(ClosingIssueLink).where(
-                col(ClosingIssueLink.repository_id).in_(repo_ids_with_close)
+                col(ClosingIssueLink.repository_id).in_(repos_in_play)
             )
         ).all():
-            if (link.repository_id, link.issue_number) in closed_issues_in_window:
-                suppressed_prs.add((link.repository_id, link.pr_number))
-
-    def _is_deduped_merge(event: ActivityEvent) -> bool:
-        """A PR_MERGED whose closed issue is also in-window — drop it, keep the issue row."""
-        return (
-            event.kind == ActivityKind.PR_MERGED
-            and (event.repository_id, event.subject_number) in suppressed_prs
-        )
+            pr_key = (link.repository_id, link.pr_number)
+            issue_key = (link.repository_id, link.issue_number)
+            if pr_key in pr_urls_by_number and issue_key in closed_issue_events:
+                issue_event = closed_issue_events[issue_key]
+                pr_to_closed_issues.setdefault(pr_key, []).append(issue_event)
+                nested_issue_event_ids.add(issue_event.id)
 
     repo_ids = {event.repository_id for event in events}
     repositories = {
@@ -792,23 +808,49 @@ def get_whats_happened(
             continue  # defensive: skip an event whose repo somehow isn't cached
         if _is_self_review(event):
             continue  # bob reviewing bob's own PR isn't review activity worth reporting
-        if _is_deduped_merge(event):
-            continue  # the linked issue's ISSUE_CLOSED row already represents this work
+        if event.id in nested_issue_event_ids:
+            continue  # nested under its closing PR instead of shown as its own row
         item = ActivityEventItem(event=event, repository=repositories[event.repository_id])
         by_login.setdefault(event.actor_login, []).append(item)
 
+    # Build the nested "closed issue #N" child rows for each merged PR, keyed by the PR's URL
+    # (the merged-PR ``AggregatedActivity`` carries ``subject_html_url``, so children can be
+    # matched onto it below regardless of which engineer authored the PR). Reuse ``_aggregate``
+    # so repeated closes collapse and sort the same way top-level rows do.
+    pr_url_children: dict[str, tuple[AggregatedActivity, ...]] = {}
+    for pr_key, issue_events in pr_to_closed_issues.items():
+        pr_url = pr_urls_by_number[pr_key]
+        child_items = [
+            ActivityEventItem(event=e, repository=repositories[e.repository_id])
+            for e in issue_events
+            if e.repository_id in repositories
+        ]
+        pr_url_children[pr_url] = tuple(_aggregate(child_items))
+
     # Order engineers by login; the null-actor bucket (if present) sorts last. Each engineer's
     # events are deduped into aggregated rows, then split into PR / review / issue sections
-    # (each already newest-first, since ``_aggregate`` sorts).
+    # (each already newest-first, since ``_aggregate`` sorts). Merged-PR rows get their closed
+    # issues attached as ``children``.
     engineers = []
     for login, items in sorted(
         by_login.items(), key=lambda kv: (kv[0] is None, kv[0] or "")
     ):
         aggregated = _aggregate(items)
+        # Attach children only to the *merged* PR row: "opened PR #42" and "merged PR #42" share
+        # a subject URL, so guard on the merge verb so an opened row never inherits the issues.
+        merged_verb = _ACTIVITY_VERBS[ActivityKind.PR_MERGED]
+        prs = [
+            replace(a, children=pr_url_children[a.subject_html_url])
+            if a.subject_html_url in pr_url_children
+            and a.action_phrase.startswith(f"{merged_verb} ")
+            else a
+            for a in aggregated
+            if a.group == "prs"
+        ]
         engineers.append(
             EngineerActivity(
                 login=login,
-                prs=[a for a in aggregated if a.group == "prs"],
+                prs=prs,
                 reviews=[a for a in aggregated if a.group == "reviews"],
                 issues=[a for a in aggregated if a.group == "issues"],
             )

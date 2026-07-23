@@ -152,8 +152,9 @@ class FakeGitHubConnector:
         return list(self._links)
 
     def list_closing_issue_number_links(
-        self, owner: str, name: str
+        self, owner: str, name: str, *, since: datetime
     ) -> list[tuple[int, int]]:
+        # Canned data isn't time-stamped; the ``since`` bound is exercised in the connector test.
         return list(self._number_links)
 
     def list_activity_since(
@@ -194,9 +195,11 @@ class FakeMultiRepoConnector:
         return self._for(owner, name).list_closing_issue_links(owner, name)
 
     def list_closing_issue_number_links(
-        self, owner: str, name: str
+        self, owner: str, name: str, *, since: datetime
     ) -> list[tuple[int, int]]:
-        return self._for(owner, name).list_closing_issue_number_links(owner, name)
+        return self._for(owner, name).list_closing_issue_number_links(
+            owner, name, since=since
+        )
 
     def list_activity_since(
         self, owner: str, name: str, *, since: datetime

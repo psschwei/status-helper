@@ -75,7 +75,9 @@ def sync_repository(
     pull_requests = connector.list_pull_requests(owner, name, state="open")
     issues = connector.list_issues(owner, name, state="open")
     links = connector.list_closing_issue_links(owner, name)
-    number_links = connector.list_closing_issue_number_links(owner, name)
+    number_links = connector.list_closing_issue_number_links(
+        owner, name, since=now - _ACTIVITY_LOOKBACK
+    )
     activity = connector.list_activity_since(owner, name, since=now - _ACTIVITY_LOOKBACK)
 
     repository.last_synced_at = now

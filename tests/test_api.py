@@ -846,11 +846,53 @@ def test_whats_happened_export_csv(
         "url",
         "repository",
         "count",
+        "linked_pr",
     ]
     # Same content the HTML page shows: alice's collapsed ×2 review of PR #50 is one row (count 2),
     # and carol's approval renders as a "reviewed" action.
     assert any(r[0] == "alice" and r[3] == "reviewed PR #50" and r[7] == "2" for r in data)
     assert any(r[0] == "carol" and r[3] == "reviewed PR #42" for r in data)
+
+
+def test_whats_happened_export_flattens_nested_issue(
+    client: TestClient,
+    use_connector: InstallConnector,
+    use_engineers: InstallEngineers,
+) -> None:
+    """A merged PR's nested closed-issue flattens onto its own 'Issues (linked)' row, tied back
+    to the parent PR via the ``linked_pr`` column."""
+    use_engineers([])
+    use_connector(
+        FakeGitHubConnector(
+            repository=make_repository(),
+            activity=[
+                make_activity_record("pr_merged", 42, subject_title="Add X", actor_login="alice"),
+                make_activity_record(
+                    "issue_closed", 7, subject_title="A bug", actor_login="alice"
+                ),
+            ],
+            # The durable link that drives nesting: PR #42 closed issue #7.
+            number_links=[(42, 7)],
+        )
+    )
+    client.post(f"{REPO_PATH}/sync")
+
+    resp = client.get("/whats-happened/export", params={"since": _SINCE})
+    rows = list(csv.reader(io.StringIO(resp.text)))
+    data = rows[1:]
+
+    # The PR is a top-level row with an empty linked_pr; the issue is flattened underneath it.
+    assert any(
+        r[1] == "PRs" and r[3] == "merged PR #42" and r[8] == "" for r in data
+    )
+    assert any(
+        r[1] == "Issues (linked)"
+        and r[3] == "closed issue #7"
+        and r[8] == "merged PR #42"
+        for r in data
+    )
+    # The issue does NOT also appear as a standalone top-level Issues row.
+    assert not any(r[1] == "Issues" and r[3] == "closed issue #7" for r in data)
 
 
 def test_whats_happened_export_empty_state(client: TestClient) -> None:

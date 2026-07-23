@@ -16,6 +16,16 @@
               {{ act.action_phrase }}
               <a href="{{ act.subject_html_url }}">{{ act.subject_title }}</a>
               {% if act.count > 1 %}<span class="count">×{{ act.count }}</span>{% endif %}
+              {% if act.children %}
+                <ul class="nested-issues">
+                  {% for child in act.children %}
+                    <li class="nested-issue">
+                      ↳ {{ child.action_phrase }}
+                      <a href="{{ child.subject_html_url }}">{{ child.subject_title }}</a>
+                    </li>
+                  {% endfor %}
+                </ul>
+              {% endif %}
             </td>
             <td>
               <a href="/repositories/{{ act.repository.owner }}/{{ act.repository.name }}">

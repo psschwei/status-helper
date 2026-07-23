@@ -58,9 +58,39 @@ class _FakeGitHub:
         self.rest = _FakeRest()
 
     def graphql(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
-        # One page of PRs: #101 (number 1) closes issues 201/202 (numbers 11/12); #102 closes
-        # nothing. A null databaseId (a reference outside our reach) must be skipped — and, for
-        # the number-keyed variant, a null ``number`` likewise.
+        # The number-keyed query (used for the durable scrum dedup) walks all states ordered by
+        # updatedAt and carries ``updatedAt`` per node; the id-keyed one is OPEN-only and doesn't.
+        # Branch on which query arrived so each sees the shape its method expects.
+        if "orderBy" in query:
+            # #1 (in-window) closes issues 11/12 (+ a null number to skip); #3 predates SINCE and
+            # must trigger the early-break so its link (13) is NOT returned.
+            return {
+                "repository": {
+                    "pullRequests": {
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        "nodes": [
+                            {
+                                "number": 1,
+                                "updatedAt": "2026-06-10T00:00:00Z",  # after SINCE
+                                "closingIssuesReferences": {
+                                    "nodes": [
+                                        {"number": 11},
+                                        {"number": 12},
+                                        {"number": None},
+                                    ]
+                                },
+                            },
+                            {
+                                "number": 3,
+                                "updatedAt": "2026-05-01T00:00:00Z",  # before SINCE → stop here
+                                "closingIssuesReferences": {"nodes": [{"number": 13}]},
+                            },
+                        ],
+                    }
+                }
+            }
+        # One page of PRs: #101 closes issues 201/202; #102 closes nothing. A null databaseId
+        # (a reference outside our reach) must be skipped.
         return {
             "repository": {
                 "pullRequests": {
@@ -180,11 +210,12 @@ def test_list_closing_issue_links_maps_pairs_and_drops_null(
     assert links == [(101, 201), (101, 202)]
 
 
-def test_list_closing_issue_number_links_maps_pairs_and_drops_null(
+def test_list_closing_issue_number_links_maps_pairs_and_stops_at_window(
     connector: GitHubKitConnector,
 ) -> None:
-    """closingIssuesReferences → (pr_number, issue_number) pairs, skipping null numbers."""
-    links = connector.list_closing_issue_number_links("octocat", "hello-world")
+    """(pr_number, issue_number) pairs across all states, skipping null numbers, and stopping
+    once a PR predates ``since`` — so the out-of-window PR #3's link (13) is not returned."""
+    links = connector.list_closing_issue_number_links("octocat", "hello-world", since=SINCE)
     assert links == [(1, 11), (1, 12)]
 
 
