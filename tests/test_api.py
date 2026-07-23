@@ -713,11 +713,13 @@ def test_whats_happened_endpoint_returns_events(
 
     body = client.get("/api/whats-happened", params={"since": _SINCE}).json()
 
-    assert len(body["events"]) == 3
-    kinds = {(e["event"]["kind"], e["event"]["subject_number"]) for e in body["events"]}
+    # Grouped by engineer, ordered by login: alice (merge), bob (issue close), carol (review).
+    assert [eng["login"] for eng in body["engineers"]] == ["alice", "bob", "carol"]
+    all_events = [e for eng in body["engineers"] for e in eng["events"]]
+    kinds = {(e["event"]["kind"], e["event"]["subject_number"]) for e in all_events}
     assert kinds == {("pr_merged", 42), ("issue_closed", 7), ("review_submitted", 42)}
     # The repository rides along on each event.
-    assert body["events"][0]["repository"]["full_name"] == "octocat/hello-world"
+    assert all_events[0]["repository"]["full_name"] == "octocat/hello-world"
 
 
 def test_whats_happened_endpoint_since_override_filters(
@@ -730,7 +732,7 @@ def test_whats_happened_endpoint_since_override_filters(
     # A `since` in the future excludes everything.
     future = (datetime.now(UTC) + timedelta(days=1)).isoformat()
     body = client.get("/api/whats-happened", params={"since": future}).json()
-    assert body["events"] == []
+    assert body["engineers"] == []
 
 
 def test_whats_happened_endpoint_invalid_since_is_422(client: TestClient) -> None:
@@ -747,9 +749,8 @@ def test_whats_happened_endpoint_filtered_by_roster(
     use_engineers([EngineerRef(name="Alice", handles=["alice"])])
 
     body = client.get("/api/whats-happened", params={"since": _SINCE}).json()
-    # Only alice's event (the pr_merged) survives the roster filter.
-    actors = {e["event"]["actor_login"] for e in body["events"]}
-    assert actors == {"alice"}
+    # Only alice's bucket survives the roster filter.
+    assert [eng["login"] for eng in body["engineers"]] == ["alice"]
 
 
 def test_whats_happened_html_page_renders(
@@ -765,6 +766,9 @@ def test_whats_happened_html_page_renders(
     assert "What's happened since last scrum?" in page.text
     assert "merged PR #42" in page.text
     assert "approved PR #42" in page.text
+    # Grouped by engineer: each actor heads a section linking to their engineer page.
+    assert '/engineers/alice"' in page.text
+    assert '/engineers/carol"' in page.text
     # The datetime-local override box is present and pre-filled.
     assert 'type="datetime-local"' in page.text
 

@@ -592,13 +592,31 @@ class ActivityEventItem:
 
 
 @dataclass(frozen=True)
+class EngineerActivity:
+    """One engineer's activity since the scrum: their login and their events, newest first.
+
+    ``login`` is ``None`` for the bucket of events whose actor GitHub didn't report (a deleted
+    "ghost" account) — shown only when there's no roster filter, and labeled generically in the
+    UI. ``event_count`` is a convenience for the section header.
+    """
+
+    login: str | None
+    events: list[ActivityEventItem]
+
+    @property
+    def event_count(self) -> int:
+        return len(self.events)
+
+
+@dataclass(frozen=True)
 class WhatsHappenedView:
     """Everything the "what's happened since last scrum?" view needs: the effective ``since``
-    bound (so the page can echo it and pre-fill the override box) and the matching events.
+    bound (so the page can echo it and pre-fill the override box) and the activity grouped by
+    engineer.
     """
 
     since: datetime
-    events: list[ActivityEventItem]
+    engineers: list[EngineerActivity]
 
 
 def get_whats_happened(
@@ -606,14 +624,16 @@ def get_whats_happened(
     since: datetime,
     allowed_logins: set[str] | None = None,
 ) -> WhatsHappenedView:
-    """Return every activity event after ``since``, newest first, each with its repository.
+    """Return activity since ``since`` grouped by the engineer who did it.
 
-    A flat reverse-chronological timeline — the simplest faithful rendering of "what happened."
-    ``since`` is exclusive (``>``), so the scrum instant itself isn't counted as "since the
-    scrum." When ``allowed_logins`` is given, only events whose ``actor_login`` is in the roster
-    are returned (an event with a null / unknown actor is dropped under the filter) — the same
-    roster convention as :func:`list_engineers` / :func:`list_reviewers`. Repositories are
-    fetched in one query and joined in Python (fixed query count), like the helpers above.
+    Each :class:`EngineerActivity` holds one person's events, newest first; the engineers
+    themselves are ordered by login (the null-actor "ghost" bucket, if any, sorts last). This is
+    the by-engineer framing a scrum wants — "what has each person been up to" — rather than a
+    flat item timeline. ``since`` is exclusive (``>``), so the scrum instant itself isn't
+    counted. When ``allowed_logins`` is given, only events whose ``actor_login`` is in the roster
+    are returned (null-actor events drop under the filter) — the same roster convention as
+    :func:`list_engineers` / :func:`list_reviewers`. Repositories are fetched in one query and
+    joined in Python (fixed query count), like the helpers above.
     """
     statement = (
         select(ActivityEvent)
@@ -632,9 +652,20 @@ def get_whats_happened(
         ).all()
     }
 
-    items = [
-        ActivityEventItem(event=event, repository=repositories[event.repository_id])
-        for event in events
-        if event.repository_id in repositories
+    # Bucket by actor, preserving the newest-first order within each engineer (events are
+    # already sorted, so first-seen insertion keeps that order).
+    by_login: dict[str | None, list[ActivityEventItem]] = {}
+    for event in events:
+        if event.repository_id not in repositories:
+            continue  # defensive: skip an event whose repo somehow isn't cached
+        item = ActivityEventItem(event=event, repository=repositories[event.repository_id])
+        by_login.setdefault(event.actor_login, []).append(item)
+
+    # Order engineers by login; the null-actor bucket (if present) sorts last.
+    engineers = [
+        EngineerActivity(login=login, events=items)
+        for login, items in sorted(
+            by_login.items(), key=lambda kv: (kv[0] is None, kv[0] or "")
+        )
     ]
-    return WhatsHappenedView(since=since, events=items)
+    return WhatsHappenedView(since=since, engineers=engineers)

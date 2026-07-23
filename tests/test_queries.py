@@ -371,10 +371,28 @@ def test_get_engineer_view_orders_reviews_owed_by_updated_desc(session: Session)
 # --- get_whats_happened -----------------------------------------------------------
 
 
-def test_get_whats_happened_returns_events_after_since_newest_first(session: Session) -> None:
+def test_get_whats_happened_groups_by_engineer(session: Session) -> None:
     session.add(make_repository())
-    # Three events at distinct times; `since` sits between the oldest and the middle one.
-    session.add(make_activity_event(ActivityKind.PR_OPENED, 1, occurred_at=FIXED_TIME))
+    # bob has two events, alice one — grouped per person, engineers ordered by login.
+    session.add(make_activity_event(ActivityKind.PR_MERGED, 1, actor_login="bob"))
+    session.add(make_activity_event(ActivityKind.PR_OPENED, 2, actor_login="alice"))
+    session.add(make_activity_event(ActivityKind.ISSUE_CLOSED, 3, actor_login="bob"))
+    session.commit()
+
+    view = get_whats_happened(session, FIXED_TIME - timedelta(hours=1))
+
+    assert [eng.login for eng in view.engineers] == ["alice", "bob"]
+    counts = {eng.login: eng.event_count for eng in view.engineers}
+    assert counts == {"alice": 1, "bob": 2}
+    # The repository rides along on each event, joined without a per-event query.
+    assert view.engineers[0].events[0].repository.full_name == "octocat/hello-world"
+
+
+def test_get_whats_happened_events_within_engineer_are_newest_first(session: Session) -> None:
+    session.add(make_repository())
+    session.add(
+        make_activity_event(ActivityKind.PR_OPENED, 1, occurred_at=FIXED_TIME)
+    )
     session.add(
         make_activity_event(
             ActivityKind.PR_MERGED, 2, occurred_at=FIXED_TIME + timedelta(hours=2)
@@ -387,13 +405,21 @@ def test_get_whats_happened_returns_events_after_since_newest_first(session: Ses
     )
     session.commit()
 
-    view = get_whats_happened(session, FIXED_TIME + timedelta(minutes=30))
+    # All default to actor "alice", so a single engineer bucket, newest-first within it.
+    view = get_whats_happened(session, FIXED_TIME - timedelta(hours=1))
+    (alice,) = view.engineers
+    assert [item.event.subject_number for item in alice.events] == [2, 3, 1]
 
-    # The event exactly at/before `since` (PR #1) is excluded (`>`); the rest come newest-first.
-    assert [item.event.subject_number for item in view.events] == [2, 3]
-    assert view.since == FIXED_TIME + timedelta(minutes=30)
-    # The repository rides along, joined without a per-event query.
-    assert view.events[0].repository.full_name == "octocat/hello-world"
+
+def test_get_whats_happened_null_actor_bucket_sorts_last(session: Session) -> None:
+    session.add(make_repository())
+    session.add(make_activity_event(ActivityKind.PR_OPENED, 1, actor_login="alice"))
+    # A null-actor event (a ghost account) becomes the login=None bucket, ordered last.
+    session.add(make_activity_event(ActivityKind.ISSUE_CLOSED, 2, actor_login=None))
+    session.commit()
+
+    view = get_whats_happened(session, FIXED_TIME - timedelta(hours=1))
+    assert [eng.login for eng in view.engineers] == ["alice", None]
 
 
 def test_get_whats_happened_boundary_is_exclusive(session: Session) -> None:
@@ -401,10 +427,10 @@ def test_get_whats_happened_boundary_is_exclusive(session: Session) -> None:
     session.add(make_activity_event(ActivityKind.PR_MERGED, 1, occurred_at=FIXED_TIME))
     session.commit()
 
-    # An event exactly at `since` is not "since the scrum" — excluded.
-    assert get_whats_happened(session, FIXED_TIME).events == []
+    # An event exactly at `since` is not "since the scrum" — excluded (no engineers at all).
+    assert get_whats_happened(session, FIXED_TIME).engineers == []
     # A hair before, it's included.
-    assert len(get_whats_happened(session, FIXED_TIME - timedelta(seconds=1)).events) == 1
+    assert len(get_whats_happened(session, FIXED_TIME - timedelta(seconds=1)).engineers) == 1
 
 
 def test_get_whats_happened_respects_roster(session: Session) -> None:
@@ -416,17 +442,17 @@ def test_get_whats_happened_respects_roster(session: Session) -> None:
     session.commit()
 
     since = FIXED_TIME - timedelta(hours=1)
-    # With a roster, only alice's event survives.
+    # With a roster, only alice's bucket survives (bob filtered, null dropped).
     filtered = get_whats_happened(session, since, allowed_logins={"alice"})
-    assert [item.event.subject_number for item in filtered.events] == [1]
-    # With no roster (None), everyone including the null-actor event is shown.
+    assert [eng.login for eng in filtered.engineers] == ["alice"]
+    # With no roster (None), everyone including the null-actor bucket is shown.
     unfiltered = get_whats_happened(session, since, allowed_logins=None)
-    assert {item.event.subject_number for item in unfiltered.events} == {1, 2, 3}
+    assert [eng.login for eng in unfiltered.engineers] == ["alice", "bob", None]
 
 
 def test_get_whats_happened_empty(session: Session) -> None:
     view = get_whats_happened(session, FIXED_TIME)
-    assert view.events == []
+    assert view.engineers == []
     assert view.since == FIXED_TIME
 
 
@@ -446,6 +472,8 @@ def test_activity_event_item_action_phrase(session: Session) -> None:
     session.commit()
 
     view = get_whats_happened(session, FIXED_TIME)
-    phrases = {item.event.subject_number: item.action_phrase for item in view.events}
+    # Both default to actor "alice" → one bucket.
+    (alice,) = view.engineers
+    phrases = {item.event.subject_number: item.action_phrase for item in alice.events}
     assert phrases[42] == "approved PR #42"
     assert phrases[9] == "merged PR #9"

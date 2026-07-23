@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict
 
 from status_assistant.queries import (
     ActivityEventItem,
+    EngineerActivity,
     EngineerListItem,
     EngineerView,
     RepositoryListItem,
@@ -236,17 +237,33 @@ class ActivityEventItemOut(BaseModel):
         )
 
 
+class EngineerActivityOut(BaseModel):
+    """One engineer's activity: their login (null for the ghost bucket) and their events."""
+
+    login: str | None
+    events: list[ActivityEventItemOut]
+
+    @classmethod
+    def from_item(cls, item: EngineerActivity) -> "EngineerActivityOut":
+        return cls(
+            login=item.login,
+            events=[ActivityEventItemOut.from_item(e) for e in item.events],
+        )
+
+
 class WhatsHappenedOut(BaseModel):
-    """The "what's happened since last scrum?" payload: the effective ``since`` and the events."""
+    """The "what's happened since last scrum?" payload: the effective ``since`` and the activity
+    grouped by engineer.
+    """
 
     since: datetime
-    events: list[ActivityEventItemOut]
+    engineers: list[EngineerActivityOut]
 
     @classmethod
     def from_view(cls, view: WhatsHappenedView) -> "WhatsHappenedOut":
         return cls(
             since=view.since,
-            events=[ActivityEventItemOut.from_item(e) for e in view.events],
+            engineers=[EngineerActivityOut.from_item(e) for e in view.engineers],
         )
 
 

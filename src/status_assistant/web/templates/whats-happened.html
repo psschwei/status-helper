@@ -4,7 +4,7 @@
 {% block content %}
 <section class="repo-header">
   <h1>What's happened since last scrum?</h1>
-  <p class="synced">Activity since {{ view.since | datetime }}.</p>
+  <p class="synced">Activity by engineer since {{ view.since | datetime }}.</p>
   <form class="since-form" method="get" action="/whats-happened">
     <label for="since">Since</label>
     <input type="datetime-local" id="since" name="since" value="{{ since_input }}">
@@ -12,36 +12,46 @@
   </form>
 </section>
 
-<section class="panel">
-  <h2>Activity <span class="count">{{ view.events | length }}</span></h2>
-  {% if view.events %}
-    <table>
-      <thead>
-        <tr><th>When</th><th>Who</th><th>What</th><th>Where</th></tr>
-      </thead>
-      <tbody>
-        {% for item in view.events %}
-          <tr>
-            <td>{{ item.event.occurred_at | datetime }}</td>
-            <td>{{ item.event.actor_login or "—" }}</td>
-            <td>
-              {{ item.action_phrase }}
-              <a href="{{ item.event.subject_html_url }}">{{ item.event.subject_title }}</a>
-            </td>
-            <td>
-              <a href="/repositories/{{ item.repository.owner }}/{{ item.repository.name }}">
-                {{ item.repository.full_name }}
-              </a>
-            </td>
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  {% else %}
+{% if view.engineers %}
+  {% for eng in view.engineers %}
+    <section class="panel">
+      <h2>
+        {% if eng.login %}
+          <a href="/engineers/{{ eng.login }}">{{ eng.login }}</a>
+        {% else %}
+          Unknown
+        {% endif %}
+        <span class="count">{{ eng.event_count }}</span>
+      </h2>
+      <table>
+        <thead>
+          <tr><th>When</th><th>What</th><th>Where</th></tr>
+        </thead>
+        <tbody>
+          {% for item in eng.events %}
+            <tr>
+              <td>{{ item.event.occurred_at | datetime }}</td>
+              <td>
+                {{ item.action_phrase }}
+                <a href="{{ item.event.subject_html_url }}">{{ item.event.subject_title }}</a>
+              </td>
+              <td>
+                <a href="/repositories/{{ item.repository.owner }}/{{ item.repository.name }}">
+                  {{ item.repository.full_name }}
+                </a>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+  {% endfor %}
+{% else %}
+  <section class="panel">
     <p class="empty-list">
       No activity since {{ view.since | datetime }}. Sync a repository first:
       <code>curl -X POST localhost:8000/api/repositories/sync</code>
     </p>
-  {% endif %}
-</section>
+  </section>
+{% endif %}
 {% endblock %}
