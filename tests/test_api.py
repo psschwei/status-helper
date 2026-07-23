@@ -5,6 +5,8 @@ Drives the app through ``TestClient`` with the connector overridden by a
 exercised without touching GitHub.
 """
 
+import csv
+import io
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
@@ -817,3 +819,43 @@ def test_whats_happened_page_empty_state(client: TestClient) -> None:
     resp = client.get("/whats-happened")
     assert resp.status_code == 200
     assert "No activity since" in resp.text
+
+
+def test_whats_happened_export_csv(
+    client: TestClient,
+    use_connector: InstallConnector,
+    use_engineers: InstallEngineers,
+) -> None:
+    _sync_activity(client, use_connector, use_engineers)
+
+    resp = client.get("/whats-happened/export", params={"since": _SINCE})
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/csv")
+    assert "attachment" in resp.headers["content-disposition"]
+    assert ".csv" in resp.headers["content-disposition"]
+
+    rows = list(csv.reader(io.StringIO(resp.text)))
+    header, data = rows[0], rows[1:]
+    assert header == [
+        "engineer",
+        "section",
+        "date",
+        "action",
+        "subject",
+        "url",
+        "repository",
+        "count",
+    ]
+    # Same content the HTML page shows: alice's collapsed ×2 review of PR #50 is one row (count 2),
+    # and carol's approval renders as a "reviewed" action.
+    assert any(r[0] == "alice" and r[3] == "reviewed PR #50" and r[7] == "2" for r in data)
+    assert any(r[0] == "carol" and r[3] == "reviewed PR #42" for r in data)
+
+
+def test_whats_happened_export_empty_state(client: TestClient) -> None:
+    resp = client.get("/whats-happened/export")
+    assert resp.status_code == 200
+    rows = list(csv.reader(io.StringIO(resp.text)))
+    # Header only, no data rows.
+    assert len(rows) == 1

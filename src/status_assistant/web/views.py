@@ -5,13 +5,15 @@ synced, its page still returns 200 with a friendly "not synced yet" state (an un
 repo isn't an error in the browser — it's the expected first-run state).
 """
 
+import csv
+import io
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from sqlmodel import Session
 
@@ -236,6 +238,55 @@ def whats_happened_page(
             "view": get_whats_happened(session, effective_since, allowed),
             "since_input": _since_input_value(effective_since, schedule),
         },
+    )
+
+
+@router.get("/whats-happened/export")
+def whats_happened_export(
+    session: SessionDep, settings: SettingsDep, since: str | None = None
+) -> StreamingResponse:
+    """Download the "since last scrum" activity as a CSV file.
+
+    Reuses the same query, ``since`` resolution, and engineer-roster filter as the page above, so
+    the export matches exactly what the user sees — one row per deduped :class:`AggregatedActivity`,
+    with the engineer, section, date, action, subject, URL, repository, and count. The filename
+    embeds the effective ``since`` date so multiple exports don't collide.
+    """
+    schedule = settings.load_scrum()
+    effective_since = _parse_since_web(since, schedule) or last_scrum_before(
+        schedule, datetime.now(UTC)
+    )
+    allowed = allowed_logins(settings.load_engineers())
+    view = get_whats_happened(session, effective_since, allowed)
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(
+        ["engineer", "section", "date", "action", "subject", "url", "repository", "count"]
+    )
+    for eng in view.engineers:
+        login = eng.login or "unknown"
+        for section, rows in (("PRs", eng.prs), ("Reviews", eng.reviews), ("Issues", eng.issues)):
+            for act in rows:
+                writer.writerow(
+                    [
+                        login,
+                        section,
+                        _format_date(act.latest),
+                        act.action_phrase,
+                        act.subject_title,
+                        act.subject_html_url,
+                        act.repository.full_name,
+                        act.count,
+                    ]
+                )
+
+    buffer.seek(0)
+    filename = f"scrum-{effective_since.strftime('%Y-%m-%d')}.csv"
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

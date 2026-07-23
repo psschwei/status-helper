@@ -37,6 +37,7 @@
     <label for="since">Since</label>
     <input type="datetime-local" id="since" name="since" value="{{ since_input }}">
     <button type="submit" class="btn">Update</button>
+    <a class="btn" href="/whats-happened/export?since={{ since_input | urlencode }}">Export CSV</a>
   </form>
 </section>
 
