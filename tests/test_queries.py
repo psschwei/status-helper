@@ -410,6 +410,18 @@ def test_get_whats_happened_splits_prs_reviews_issues(session: Session) -> None:
     assert alice.action_count == 4
 
 
+def test_get_whats_happened_renders_pr_commit_as_worked_on(session: Session) -> None:
+    """A PR_COMMIT event surfaces as a "worked on" row in the engineer's PRs section."""
+    session.add(make_repository())
+    session.add(make_activity_event(ActivityKind.PR_COMMIT, 5, actor_login="alice"))
+    session.commit()
+
+    (alice,) = get_whats_happened(session, FIXED_TIME - timedelta(hours=1)).engineers
+    assert [a.action_phrase for a in alice.prs] == ["worked on PR #5"]
+    assert alice.reviews == []
+    assert alice.issues == []
+
+
 def test_get_whats_happened_excludes_self_reviews(session: Session) -> None:
     """bob reviewing bob's own PR isn't counted; bob reviewing alice's PR is."""
     session.add(make_repository())

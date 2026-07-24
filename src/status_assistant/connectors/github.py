@@ -305,6 +305,75 @@ class GitHubKitConnector:
             pr_cursor = page["endCursor"]
         return links
 
+    # Latest commit date per PR, for the "worked on" scrum row. Fetched over GraphQL rather than
+    # the REST ``pulls.list_commits`` endpoint (which is one call *per PR*): this is a single
+    # cursor-paginated walk of all PRs newest-first by ``updatedAt``, asking each for just its most
+    # recent commit (``commits(last: 1)``). A push bumps a PR's ``updatedAt``, so the newest commit
+    # is the one that matters — and ``committedDate`` is when it landed, which is all a "worked on"
+    # row needs. The caller stops paging once a PR predates the window, the same early-break
+    # ``list_closing_issue_number_links`` uses. ``last: 1`` isn't paginated — we only ever want the
+    # tail. A PR with zero commits (an empty ``nodes``) simply contributes nothing.
+    _LATEST_COMMIT_QUERY = """
+    query($owner: String!, $name: String!, $prCursor: String) {
+      repository(owner: $owner, name: $name) {
+        pullRequests(
+          first: 50, after: $prCursor,
+          orderBy: {field: UPDATED_AT, direction: DESC}
+        ) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            number
+            updatedAt
+            commits(last: 1) {
+              nodes { commit { committedDate } }
+            }
+          }
+        }
+      }
+    }
+    """
+
+    def _latest_commit_dates_since(
+        self, owner: str, name: str, since: datetime
+    ) -> dict[int, datetime]:
+        """Map each in-window PR's number to its most recent commit date (UTC).
+
+        Walks PRs newest-first by ``updatedAt`` and reads each PR's latest commit's
+        ``committedDate``. Only PRs updated at/after ``since`` are included — the walk breaks once
+        a PR predates the window (sorted desc), so this is bounded to the same window the activity
+        feed cares about. A node missing its number, its commit, or the ``committedDate`` is
+        skipped. The returned date is *not* itself filtered against ``since``; the caller
+        (:meth:`_pr_activity`) applies the in-window commit check, since only it knows whether a
+        PR was opened/concluded in-window (and should therefore be suppressed).
+        """
+        latest_by_number: dict[int, datetime] = {}
+        pr_cursor: str | None = None
+        while True:
+            data = self._github.graphql(
+                self._LATEST_COMMIT_QUERY,
+                {"owner": owner, "name": name, "prCursor": pr_cursor},
+            )
+            connection = data["repository"]["pullRequests"]
+            stop = False
+            for pr in connection["nodes"]:
+                if _parse_iso(pr["updatedAt"]) < since:
+                    stop = True  # sorted desc: this and all later PRs are outside the window
+                    break
+                pr_number = pr.get("number")
+                if pr_number is None:
+                    continue
+                commit_nodes = pr["commits"]["nodes"]
+                if not commit_nodes:
+                    continue  # a PR with no commits contributes no "worked on"
+                committed_date = commit_nodes[0]["commit"].get("committedDate")
+                if committed_date is not None:
+                    latest_by_number[pr_number] = _parse_iso(committed_date)
+            page = connection["pageInfo"]
+            if stop or not page["hasNextPage"]:
+                break
+            pr_cursor = page["endCursor"]
+        return latest_by_number
+
     # --- Activity feed ------------------------------------------------------------
 
     def list_activity_since(
@@ -328,12 +397,24 @@ class GitHubKitConnector:
         since: datetime,
         in_window_prs: list[tuple[int, int, str, str]],
     ) -> list[ActivityRecord]:
-        """Opened / merged / closed events from PRs updated since ``since``.
+        """Opened / merged / closed / worked-on events from PRs updated since ``since``.
 
         ``pulls.list`` is sorted by ``updated_at`` descending, so once a PR predates the window
         every remaining PR does too — we stop paginating there rather than walking all history.
+
+        A ``PR_COMMIT`` ("worked on") event is emitted for a PR that is **still open** and was
+        **neither opened nor merged/closed within the window** but received commits during it —
+        the in-between work a bare opened/merged timeline can't show. It is intentionally
+        suppressed for a PR opened or concluded in-window (that PR already has its own row), so the
+        two never double up. The latest-commit dates come from a single GraphQL walk
+        (:meth:`_latest_commit_dates_since`) done once up front, not a REST call per PR, so this
+        adds one request regardless of how many PRs are in the window.
         """
         records: list[ActivityRecord] = []
+        # One GraphQL request for every in-window PR's latest commit date, keyed by PR number.
+        # A PR receiving a commit is only "worth" reporting when it wasn't opened/concluded in the
+        # window, which we decide per-PR below; the map itself is unfiltered on ``since``.
+        latest_commit_by_number = self._latest_commit_dates_since(owner, name, since)
         prs = self._paginate(
             self._github.rest.pulls.list,
             owner=owner,
@@ -348,17 +429,31 @@ class GitHubKitConnector:
             in_window_prs.append((pr.id, pr.number, pr.title, pr.html_url))
 
             created_at = _to_datetime(pr.created_at)
-            if created_at >= since:
+            opened_in_window = created_at >= since
+            if opened_in_window:
                 records.append(
                     self._pr_record(pr, ActivityKind.PR_OPENED, created_at)
                 )
             merged_at = _to_datetime_opt(getattr(pr, "merged_at", None))
             closed_at = _to_datetime_opt(getattr(pr, "closed_at", None))
+            concluded_in_window = False
             if merged_at is not None and merged_at >= since:
                 # A merged PR is also "closed"; emit only PR_MERGED so it isn't double-counted.
                 records.append(self._pr_record(pr, ActivityKind.PR_MERGED, merged_at))
+                concluded_in_window = True
             elif pr.state == "closed" and closed_at is not None and closed_at >= since:
                 records.append(self._pr_record(pr, ActivityKind.PR_CLOSED, closed_at))
+                concluded_in_window = True
+
+            # "Worked on": a still-open PR that predates the window but got a commit during it.
+            # Suppressed when the PR was opened or concluded in-window — those rows already
+            # represent the work, so a "worked on" row would just be noise on the same subject.
+            if pr.state == "open" and not opened_in_window and not concluded_in_window:
+                latest_commit = latest_commit_by_number.get(pr.number)
+                if latest_commit is not None and latest_commit >= since:
+                    records.append(
+                        self._pr_record(pr, ActivityKind.PR_COMMIT, latest_commit)
+                    )
         return records
 
     def _pr_record(

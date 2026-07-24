@@ -247,15 +247,54 @@ class _FakeActivityRest:
         def list_for_repo(**kwargs: Any) -> None: ...
 
 
+def _iso(when: datetime) -> str:
+    """Format a datetime the way GitHub's GraphQL does (trailing ``Z``), for ``_parse_iso``."""
+    return when.isoformat().replace("+00:00", "Z")
+
+
 class _FakeActivityGitHub:
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self.rest = _FakeActivityRest()
 
+    def graphql(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
+        # The latest-commit walk (for "worked on") asks each PR for its most recent commit's
+        # committedDate, newest-first by updatedAt. #14 has an in-window commit ("worked on");
+        # #15's latest commit predates the window (the caller filters it out); #10 (merged) and
+        # #12 (opened) also carry an in-window commit, to prove suppression is by
+        # window-classification, not absence of commits. #13 predates SINCE → the walk must break
+        # before it (and any node with no commits contributes nothing).
+        def node(number: int, updated: datetime, commit: datetime | None) -> dict[str, Any]:
+            commit_nodes = (
+                [{"commit": {"committedDate": _iso(commit)}}] if commit is not None else []
+            )
+            return {
+                "number": number,
+                "updatedAt": _iso(updated),
+                "commits": {"nodes": commit_nodes},
+            }
+
+        return {
+            "repository": {
+                "pullRequests": {
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "nodes": [
+                        node(10, AFTER, AFTER),
+                        node(11, AFTER, None),
+                        node(12, AFTER, AFTER),
+                        node(14, AFTER, AFTER),
+                        node(15, AFTER, BEFORE),
+                        node(13, BEFORE, AFTER),  # predates SINCE → walk breaks here
+                    ],
+                }
+            }
+        }
+
     def paginate(self, request: Any, **kwargs: Any) -> list[SimpleNamespace]:
         if request is self.rest.pulls.list:
             # Sorted by updated_at desc, as the real endpoint is called. #10 merged in-window,
-            # #11 closed-unmerged in-window, #12 opened in-window, #13 is older than SINCE (the
-            # loop must break before mapping it).
+            # #11 closed-unmerged in-window, #12 opened in-window, #14 open & pre-window with
+            # in-window commits ("worked on"), #15 open & pre-window with only old commits (no
+            # "worked on"), #13 is older than SINCE (the loop must break before mapping it).
             return [
                 ns(id=10, number=10, title="Merged one", state="closed",
                    user=ns(login="alice"), html_url="https://x/pull/10",
@@ -266,6 +305,12 @@ class _FakeActivityGitHub:
                 ns(id=12, number=12, title="Opened one", state="open",
                    user=ns(login="carol"), html_url="https://x/pull/12",
                    created_at=AFTER, updated_at=AFTER, merged_at=None, closed_at=None),
+                ns(id=14, number=14, title="Worked-on one", state="open",
+                   user=ns(login="heidi"), html_url="https://x/pull/14",
+                   created_at=BEFORE, updated_at=AFTER, merged_at=None, closed_at=None),
+                ns(id=15, number=15, title="Stale open one", state="open",
+                   user=ns(login="ivan"), html_url="https://x/pull/15",
+                   created_at=BEFORE, updated_at=AFTER, merged_at=None, closed_at=None),
                 ns(id=13, number=13, title="Ancient", state="closed",
                    user=ns(login="dave"), html_url="https://x/pull/13",
                    created_at=BEFORE, updated_at=BEFORE, merged_at=BEFORE, closed_at=BEFORE),
@@ -341,6 +386,32 @@ def test_list_activity_since_maps_reviews_and_skips_pending_and_old(
     assert reviews[0].actor_login == "erin"
     assert reviews[0].detail == "approved"
     assert reviews[0].review_id == 900
+
+
+def test_list_activity_since_maps_commits_on_open_prs(
+    activity_connector: GitHubKitConnector,
+) -> None:
+    records = activity_connector.list_activity_since("o", "n", since=SINCE)
+    commits = [r for r in records if r.kind == "pr_commit"]
+    # Only #14 (open, opened before the window, with an in-window commit) is "worked on". #15 is
+    # open but its commits all predate the window, so it produces no event.
+    assert len(commits) == 1
+    worked = commits[0]
+    assert worked.subject_number == 14
+    assert worked.actor_login == "heidi"  # attributed to the PR author
+    assert worked.occurred_at == AFTER  # the latest in-window commit date
+    assert all(r.subject_number != 15 for r in commits)
+
+
+def test_list_activity_since_suppresses_commits_for_opened_or_merged_prs(
+    activity_connector: GitHubKitConnector,
+) -> None:
+    records = activity_connector.list_activity_since("o", "n", since=SINCE)
+    commit_numbers = {r.subject_number for r in records if r.kind == "pr_commit"}
+    # #12 was opened in-window and #10 was merged in-window; both carry an in-window commit, but a
+    # "worked on" row is suppressed for them — the opened/merged row already stands for the work.
+    assert 12 not in commit_numbers
+    assert 10 not in commit_numbers
 
 
 def test_enterprise_base_url_is_passed_to_client(monkeypatch: pytest.MonkeyPatch) -> None:

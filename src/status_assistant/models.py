@@ -164,13 +164,18 @@ class ActivityKind(StrEnum):
     """The kinds of activity captured in the append-only :class:`ActivityEvent` log.
 
     ``PR_CLOSED`` means a pull request closed *without* being merged — a merged PR emits
-    ``PR_MERGED`` instead, never both, so a timeline reads cleanly. Values are the strings
-    stored in the database (``StrEnum`` serializes to its value in TEXT and JSON alike).
+    ``PR_MERGED`` instead, never both, so a timeline reads cleanly. ``PR_COMMIT`` ("worked on")
+    marks commits pushed to a PR *during* the view window; it is emitted only for a PR that was
+    neither opened nor merged/closed in that window (one that existed before and is still open),
+    so it never doubles up with an ``PR_OPENED`` / ``PR_MERGED`` / ``PR_CLOSED`` row for the same
+    PR — it fills the in-between gap those transitions leave. Values are the strings stored in the
+    database (``StrEnum`` serializes to its value in TEXT and JSON alike).
     """
 
     PR_OPENED = "pr_opened"
     PR_MERGED = "pr_merged"
     PR_CLOSED = "pr_closed"
+    PR_COMMIT = "pr_commit"
     ISSUE_OPENED = "issue_opened"
     ISSUE_CLOSED = "issue_closed"
     REVIEW_SUBMITTED = "review_submitted"

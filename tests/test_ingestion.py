@@ -331,24 +331,28 @@ def test_sync_persists_activity_events(session: Session) -> None:
             make_activity_record(
                 "review_submitted", 42, actor_login="bob", detail="approved", review_id=999
             ),
+            make_activity_record("pr_commit", 50, subject_title="WIP feature"),
         ],
     )
 
     result = sync_repository(session, connector, "octocat", "hello-world")
 
-    assert result.events == 3
+    assert result.events == 4
     events = {e.id: e for e in session.exec(select(ActivityEvent)).all()}
-    # Deterministic keys: state transitions carry no detail id; reviews carry the review id.
+    # Deterministic keys: state transitions (incl. pr_commit, one per PR) carry no detail id;
+    # reviews carry the review id.
     assert set(events) == {
         "1296269:pr:42:pr_merged",
         "1296269:issue:7:issue_closed",
         "1296269:pr:42:review_submitted:999",
+        "1296269:pr:50:pr_commit",
     }
     merged = events["1296269:pr:42:pr_merged"]
     assert merged.subject_title == "Add X"
     # Ingestion stamps the real repo id (the connector doesn't know it).
     assert merged.repository_id == 1296269
     assert events["1296269:pr:42:review_submitted:999"].detail == "approved"
+    assert events["1296269:pr:50:pr_commit"].kind == ActivityKind.PR_COMMIT
 
 
 def test_resync_appends_activity_and_never_deletes(session: Session) -> None:
