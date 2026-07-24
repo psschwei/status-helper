@@ -252,8 +252,8 @@ def whats_happened_export(
     the export matches exactly what the user sees — one row per deduped :class:`AggregatedActivity`,
     with the engineer, section, date, action, subject, URL, repository, and count. A merged PR's
     nested closed-issues are flattened onto their own ``Issues (linked)`` rows whose ``linked_pr``
-    column names the parent PR, so the tree is preserved losslessly. The filename embeds the
-    effective ``since`` date so multiple exports don't collide.
+    column names the parent PR, so the tree is preserved losslessly. The filename embeds today's
+    date (``scrum-YYYY-MM-DD.csv``).
     """
     schedule = settings.load_scrum()
     effective_since = _parse_since_web(since, schedule) or last_scrum_before(
@@ -303,7 +303,7 @@ def whats_happened_export(
                     )
 
     buffer.seek(0)
-    filename = f"scrum-{effective_since.strftime('%Y-%m-%d')}.csv"
+    filename = f"scrum-{datetime.now(UTC).strftime('%Y-%m-%d')}.csv"
     return StreamingResponse(
         iter([buffer.getvalue()]),
         media_type="text/csv",
