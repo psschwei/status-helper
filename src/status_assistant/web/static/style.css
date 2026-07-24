@@ -31,6 +31,8 @@ a:hover { text-decoration: underline; }
 }
 .site-title { font-weight: 600; color: var(--text); }
 .site-nav { display: flex; gap: 1rem; font-size: 0.9rem; }
+/* Push the Sync all button to the far right of the header. */
+.site-sync { margin-left: auto; }
 
 .content {
   max-width: 960px;

@@ -136,17 +136,18 @@ def dashboard(request: Request, session: SessionDep, settings: SettingsDep) -> H
 
 @router.post("/sync")
 def sync_all_repositories(
-    session: SessionDep, connector: ConnectorDep, settings: SettingsDep
+    request: Request, session: SessionDep, connector: ConnectorDep, settings: SettingsDep
 ) -> RedirectResponse:
-    """Sync every watched repository, then redirect back to the dashboard.
+    """Sync every watched repository, then redirect back to the originating page.
 
-    Backs the dashboard's "Sync all" button. This is a plain form POST that runs the sync
-    synchronously (the same ``sync_all`` the JSON API uses) and follows the
-    POST-redirect-GET pattern: on success it 303-redirects to ``/`` so a refresh doesn't
-    re-submit and the reloaded dashboard shows the fresh counts and last-synced times.
+    Backs the "Sync all" button in the site header, which appears on every page. This is a
+    plain form POST that runs the sync synchronously (the same ``sync_all`` the JSON API
+    uses) and follows the POST-redirect-GET pattern: on success it 303-redirects back to the
+    page the button was pressed on (via the ``Referer`` header, falling back to the
+    dashboard) so a refresh doesn't re-submit and the reloaded page shows the fresh data.
     """
     sync_all(session, connector, settings.load_repos())
-    return RedirectResponse(url="/", status_code=303)
+    return RedirectResponse(url=request.headers.get("referer") or "/", status_code=303)
 
 
 @router.get("/repositories/{owner}/{name}", response_class=HTMLResponse)

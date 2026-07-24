@@ -15,6 +15,9 @@
       <a href="/reviews">Reviews</a>
       <a href="/whats-happened">Since last scrum</a>
     </nav>
+    <form class="site-sync" method="post" action="/sync">
+      <button type="submit" class="btn">Sync all</button>
+    </form>
   </header>
   <main class="content">
     {% block content %}{% endblock %}

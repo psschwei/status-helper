@@ -235,6 +235,31 @@ def test_web_sync_button_syncs_and_redirects(
     assert counts == {"octocat/hello-world": (1, 1), "acme/api": (2, 0)}
 
 
+def test_sync_button_appears_on_every_page(
+    client: TestClient, use_connector: InstallConnector, use_repos: InstallRepos
+) -> None:
+    """The Sync all button lives in the shared header, so it renders on all pages."""
+    use_connector(_multi_connector())
+    use_repos([("octocat", "hello-world")])
+
+    for path in ("/", "/engineers", "/reviews", "/whats-happened"):
+        html = client.get(path).text
+        assert 'action="/sync"' in html, path
+        assert "Sync all" in html, path
+
+
+def test_web_sync_redirects_back_to_originating_page(
+    client: TestClient, use_connector: InstallConnector, use_repos: InstallRepos
+) -> None:
+    """Syncing from a non-dashboard page returns you there, not to the dashboard."""
+    use_connector(_multi_connector())
+    use_repos([("octocat", "hello-world")])
+
+    resp = client.post("/sync", headers={"referer": "/reviews"}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/reviews"
+
+
 # --- Engineers -------------------------------------------------------------------
 
 # In _multi_connector, make_pull_request defaults author to "alice": alice authors PRs in
